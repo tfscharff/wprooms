@@ -12,7 +12,9 @@
 if ( ! defined( 'ABSPATH' ) ) { exit; }
 
 define( 'MCW_ROOMS_OPTION', 'mcw_rooms' );
-define( 'MCW_ROOMS_VERSION', '1.0.0' );
+// Version is single-sourced from the plugin header above (SemVer 2.0.0), read via
+// get_file_data() so the constant can never drift from the canonical Version: field.
+define( 'MCW_ROOMS_VERSION', get_file_data( __FILE__, array( 'Version' => 'Version' ) )['Version'] );
 define( 'MCW_ROOMS_DB_VERSION', '1' );
 define( 'MCW_ROOMS_REPLY_TO', 'library@wheatoncollege.edu' );
 
