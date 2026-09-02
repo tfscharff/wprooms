@@ -368,7 +368,7 @@ function mcw_rooms_reserve( WP_REST_Request $req ) {
 	if ( ! wp_verify_nonce( $req->get_param( '_wpnonce' ), 'wp_rest' ) ) {
 		return new WP_Error( 'mcw_nonce', 'Your session expired. Please reload the page and try again.', array( 'status' => 403 ) );
 	}
-	if ( '' !== trim( (string) $req->get_param( 'website' ) ) ) {
+	if ( '' !== trim( (string) $req->get_param( 'mcw_hp' ) ) ) {
 		return new WP_Error( 'mcw_bot', 'Submission blocked.', array( 'status' => 400 ) );
 	}
 
@@ -861,7 +861,7 @@ function openForm(roomId,start){
     +'<div class="fld"><label for="mcw-rf-first">First name</label><input type="text" id="mcw-rf-first" autocomplete="given-name" aria-describedby="mcw-rf-first-e"><div class="err" id="mcw-rf-first-e" data-e="first" role="alert"></div></div>'
     +'<div class="fld"><label for="mcw-rf-last">Last name</label><input type="text" id="mcw-rf-last" autocomplete="family-name" aria-describedby="mcw-rf-last-e"><div class="err" id="mcw-rf-last-e" data-e="last" role="alert"></div></div>'
     +'<div class="fld"><label for="mcw-rf-email">Email</label><input type="email" id="mcw-rf-email" autocomplete="email" aria-describedby="mcw-rf-email-e"><div class="err" id="mcw-rf-email-e" data-e="email" role="alert"></div></div>'
-    +'<input type="text" name="website" style="position:absolute;left:-9999px" tabindex="-1" autocomplete="off" aria-hidden="true">'
+    +'<input type="text" name="mcw_hp" style="display:none" tabindex="-1" autocomplete="off" aria-hidden="true">'
     +'<button type="submit" class="go">Reserve</button><button type="button" class="cancel" id="mcw-rf-cancel">Cancel</button></form>';
   formEl.scrollIntoView({behavior:"smooth",block:"start"});
   document.getElementById("mcw-rf-cancel").addEventListener("click",function(){formEl.innerHTML="";var f=gridEl.querySelector('.slot.free[tabindex="0"]');if(f)f.focus();});
@@ -880,7 +880,7 @@ function submit(roomId,start){
   if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)){err("email","Enter a valid email.");ok=false;firstBad=firstBad||"mcw-rf-email";}
   if(!ok){if(firstBad){document.getElementById(firstBad).focus();}return;}
   var fd=new FormData();
-  fd.append("_wpnonce",CFG.nonce);fd.append("website",(formEl.querySelector('[name=website]')||{}).value||"");
+  fd.append("_wpnonce",CFG.nonce);fd.append("mcw_hp",(formEl.querySelector('[name=mcw_hp]')||{}).value||"");
   fd.append("room_id",roomId);fd.append("date",AVAIL.date);fd.append("start",start);
   fd.append("duration",dur);fd.append("first",first);fd.append("last",last);fd.append("email",email);
   var btn=formEl.querySelector(".go");btn.disabled=true;btn.textContent="Reserving…";
