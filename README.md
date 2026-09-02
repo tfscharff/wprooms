@@ -1,4 +1,4 @@
-# wprooms — MCW Reserve a Room
+# wprooms — Reserve a Room
 
 No-code WordPress plugin for study-room booking. Staff manage rooms and rules under
 **Reserve a Room** in wp-admin; patrons book instantly with the `[reserve_a_room]`
