@@ -17,6 +17,11 @@ Download the latest release zip, then in wp-admin: **Plugins → Add New → Upl
 
 This project uses [Semantic Versioning](https://semver.org/).
 
+### 1.1.1
+- Drop "MCW" from the plugin's display name (now just "Reserve a Room").
+  Cosmetic only; internal code identifiers, the option name, and the
+  database table are unchanged.
+
 ### 1.1.0
 - Add a 12-hour/24-hour time format toggle to the front-end booking widget.
   Display-only: switches how times are shown in the grid, aria-labels, and
