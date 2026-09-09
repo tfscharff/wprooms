@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       MCW Reserve a Room
  * Description:        No-code study-room booking: staff manage rooms and rules under Reserve a Room in wp-admin; patrons book instantly with [reserve_a_room]. Bookable hours come from the Library Hours plugin. Replaces LibCal Spaces.
- * Version:           1.0.8
+ * Version:           1.1.0
  * Author:            Madeleine Clark Wallace Library
  * License:           GPL-2.0+
  * Requires at least: 5.6
@@ -725,6 +725,10 @@ function mcw_rooms_widget_markup() {
 <div id="mcw-rooms" class="mcw-rooms" aria-live="polite">
   <div class="mcw-rooms__bar">
     <label>Date <input type="date" id="mcw-rooms-date"></label>
+    <span class="mcw-rooms__fmt" role="group" aria-label="Time format">
+      <button type="button" id="mcw-rooms-fmt24" class="fmtbtn on" aria-pressed="true">24h</button>
+      <button type="button" id="mcw-rooms-fmt12" class="fmtbtn" aria-pressed="false">12h</button>
+    </span>
   </div>
   <div id="mcw-rooms-grid"><p class="mcw-rooms__note">Loading…</p></div>
   <div id="mcw-rooms-form"></div>
@@ -732,8 +736,12 @@ function mcw_rooms_widget_markup() {
 <style>
   #mcw-rooms{--accent:#00539b;--line:#dcdcdc;--grid:#8b9198;--muted:#666;--free:#bfe6cb;--freeb:#1a7f37;--taken:#c9cccf;
     font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:#1a1a1a;max-width:100%}
-  #mcw-rooms .mcw-rooms__bar{margin:0 0 12px;font-weight:600}
+  #mcw-rooms .mcw-rooms__bar{margin:0 0 12px;font-weight:600;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
   #mcw-rooms input[type=date]{font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:6px}
+  #mcw-rooms .mcw-rooms__fmt{display:inline-flex;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+  #mcw-rooms .fmtbtn{font:inherit;font-weight:600;background:#fff;color:#1a1a1a;border:0;padding:6px 10px;cursor:pointer}
+  #mcw-rooms .fmtbtn + .fmtbtn{border-left:1px solid var(--line)}
+  #mcw-rooms .fmtbtn.on{background:var(--accent);color:#fff}
   #mcw-rooms .mcw-rooms__scroll{overflow-x:auto}
   #mcw-rooms table{border-collapse:collapse;font-size:.8rem}
   #mcw-rooms th,#mcw-rooms td{border:1px solid var(--grid);padding:0}
@@ -774,13 +782,28 @@ var CFG=window.MCW_ROOMS_CFG, root=document.getElementById("mcw-rooms");
 if(!root||!CFG)return;
 var gridEl=document.getElementById("mcw-rooms-grid"), formEl=document.getElementById("mcw-rooms-form");
 var dateEl=document.getElementById("mcw-rooms-date");
-var AVAIL=null;
+var fmt24Btn=document.getElementById("mcw-rooms-fmt24"), fmt12Btn=document.getElementById("mcw-rooms-fmt12");
+var AVAIL=null, fmt12=false; // display-only; all data/requests/emails stay 24h "HH:MM"
 function esc(x){return String(x==null?"":x).replace(/[&<>"']/g,function(c){return{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];});}
 function pad(n){return n<10?"0"+n:""+n;}
 function todayStr(){var d=new Date();return d.getFullYear()+"-"+pad(d.getMonth()+1)+"-"+pad(d.getDate());}
 function m2hhmm(m){return pad(Math.floor(m/60))+":"+pad(m%60);}
 function hhmm2m(s){var a=s.split(":");return (+a[0])*60+(+a[1]);}
 function fmtMins(m){m=+m;if(m>0&&m%60===0){var h=m/60;return h+(h===1?" hour":" hours");}return m+" minutes";}
+function dispTime(s){ // display-only "HH:MM" -> "h:mm AM/PM" when fmt12 is on; raw hhmm is never sent anywhere
+  if(!fmt12)return s;
+  var a=s.split(":"),h=+a[0],mm=a[1],ap=h<12?"AM":"PM",h12=h%12;if(h12===0)h12=12;
+  return h12+":"+mm+" "+ap;
+}
+function setFmt(is12){
+  fmt12=is12;
+  fmt12Btn.classList.toggle("on",is12);fmt12Btn.setAttribute("aria-pressed",is12?"true":"false");
+  fmt24Btn.classList.toggle("on",!is12);fmt24Btn.setAttribute("aria-pressed",is12?"false":"true");
+  if(AVAIL)renderGrid();
+  if(curOpen)openForm(curOpen.roomId,curOpen.start);
+}
+fmt24Btn.addEventListener("click",function(){setFmt(false);});
+fmt12Btn.addEventListener("click",function(){setFmt(true);});
 fetch(CFG.configUrl).then(function(r){return r.json();}).then(function(c){
   var adv=(c.rules&&c.rules.advanceDays)||14;
   var t=todayStr();dateEl.min=t;dateEl.value=t;
@@ -803,7 +826,7 @@ function renderGrid(){
     +'<div class="mcw-rooms__scroll"><table>'
     +'<caption class="mcw-sr">Room availability for '+esc(a.date)+'. Use the arrow keys to move between available times and press Enter to book.</caption>'
     +'<thead><tr><th scope="col" class="mcw-rooms__room">Room</th>';
-  cols.forEach(function(s){html+='<th scope="col">'+esc(s)+'</th>';});
+  cols.forEach(function(s){html+='<th scope="col">'+esc(dispTime(s))+'</th>';});
   html+='</tr></thead><tbody>';
   a.rooms.forEach(function(room,ri){
     var taken=(a.taken&&a.taken[room.id])||[];
@@ -813,7 +836,7 @@ function renderGrid(){
       var isTaken=taken.indexOf(s)>-1;
       var past=(a.nowMin!=null)&&(hhmm2m(s)<a.nowMin);
       if(isTaken||past){html+='<td><span class="slot taken" title="'+(isTaken?"Booked":"Past")+'"></span></td>';}
-      else{html+='<td><span class="slot free" role="button" tabindex="-1" data-ri="'+ri+'" data-ci="'+ci+'" data-room="'+esc(room.id)+'" data-start="'+esc(s)+'" aria-label="Book '+esc(room.name)+' at '+esc(s)+', '+esc(a.date)+'"></span></td>';}
+      else{html+='<td><span class="slot free" role="button" tabindex="-1" data-ri="'+ri+'" data-ci="'+ci+'" data-room="'+esc(room.id)+'" data-start="'+esc(s)+'" aria-label="Book '+esc(room.name)+' at '+esc(dispTime(s))+', '+esc(a.date)+'"></span></td>';}
     });
     html+='</tr>';
   });
@@ -851,12 +874,14 @@ function freeRun(roomId,start){
     n++;}
   return n;
 }
+var curOpen=null; // {roomId,start} of the open reservation form, so a format toggle can re-render it
 function openForm(roomId,start){
   var a=AVAIL, room=null;a.rooms.forEach(function(r){if(r.id===roomId)room=r;});
   var runs=freeRun(roomId,start); if(runs<1)return;
-  var opts="";for(var k=1;k<=runs;k++){var mins=k*30;opts+='<option value="'+mins+'">'+mins+' min ('+start+' – '+m2hhmm(hhmm2m(start)+mins)+')</option>';}
-  formEl.innerHTML='<div class="note" role="status" aria-live="polite">Reserve <strong>'+esc(room.name)+'</strong> on '+esc(a.date)+' starting <strong>'+esc(start)+'</strong>.</div>'
-    +'<form id="mcw-rf" novalidate aria-label="Reserve '+esc(room.name)+' at '+esc(start)+'">'
+  curOpen={roomId:roomId,start:start};
+  var opts="";for(var k=1;k<=runs;k++){var mins=k*30;opts+='<option value="'+mins+'">'+mins+' min ('+dispTime(start)+' – '+dispTime(m2hhmm(hhmm2m(start)+mins))+')</option>';}
+  formEl.innerHTML='<div class="note" role="status" aria-live="polite">Reserve <strong>'+esc(room.name)+'</strong> on '+esc(a.date)+' starting <strong>'+esc(dispTime(start))+'</strong>.</div>'
+    +'<form id="mcw-rf" novalidate aria-label="Reserve '+esc(room.name)+' at '+esc(dispTime(start))+'">'
     +'<div class="fld"><label for="mcw-rf-dur">Length</label><select id="mcw-rf-dur">'+opts+'</select></div>'
     +'<div class="fld"><label for="mcw-rf-first">First name</label><input type="text" id="mcw-rf-first" autocomplete="given-name" aria-describedby="mcw-rf-first-e"><div class="err" id="mcw-rf-first-e" data-e="first" role="alert"></div></div>'
     +'<div class="fld"><label for="mcw-rf-last">Last name</label><input type="text" id="mcw-rf-last" autocomplete="family-name" aria-describedby="mcw-rf-last-e"><div class="err" id="mcw-rf-last-e" data-e="last" role="alert"></div></div>'
@@ -864,7 +889,7 @@ function openForm(roomId,start){
     +'<input type="text" name="mcw_hp" style="display:none" tabindex="-1" autocomplete="off" aria-hidden="true">'
     +'<button type="submit" class="go">Reserve</button><button type="button" class="cancel" id="mcw-rf-cancel">Cancel</button></form>';
   formEl.scrollIntoView({behavior:"smooth",block:"start"});
-  document.getElementById("mcw-rf-cancel").addEventListener("click",function(){formEl.innerHTML="";var f=gridEl.querySelector('.slot.free[tabindex="0"]');if(f)f.focus();});
+  document.getElementById("mcw-rf-cancel").addEventListener("click",function(){formEl.innerHTML="";curOpen=null;var f=gridEl.querySelector('.slot.free[tabindex="0"]');if(f)f.focus();});
   document.getElementById("mcw-rf").addEventListener("submit",function(e){e.preventDefault();submit(roomId,start);});
   document.getElementById("mcw-rf-dur").focus(); // move keyboard focus into the form
 }
@@ -889,6 +914,7 @@ function submit(roomId,start){
       if(!res.ok)throw new Error(res.j&&res.j.message?res.j.message:"Could not reserve.");
       formEl.innerHTML='<div class="note" role="status" aria-live="polite" tabindex="-1">✓ Reserved! A confirmation email is on its way with a cancel link.</div>';
       var n=formEl.querySelector(".note");if(n)n.focus();
+      curOpen=null;
       load(AVAIL.date);
     }).catch(function(e){
       btn.disabled=false;btn.textContent="Reserve";

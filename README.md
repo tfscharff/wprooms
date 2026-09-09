@@ -17,6 +17,12 @@ Download the latest release zip, then in wp-admin: **Plugins → Add New → Upl
 
 This project uses [Semantic Versioning](https://semver.org/).
 
+### 1.1.0
+- Add a 12-hour/24-hour time format toggle to the front-end booking widget.
+  Display-only: switches how times are shown in the grid, aria-labels, and
+  reservation form. Submitted data, stored bookings, and confirmation
+  emails are unaffected and always use 24-hour time.
+
 ### 1.0.8
 - Fix: honeypot anti-bot field falsely blocked reservations in Chrome/Edge.
   Chromium autofill matched the hidden field by its `name="website"` and
