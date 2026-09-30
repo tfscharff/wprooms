@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       Reserve a Room
  * Description:        No-code study-room booking: staff manage rooms and rules under Reserve a Room in wp-admin; patrons book instantly with [reserve_a_room]. Bookable hours come from the Library Hours plugin. Replaces LibCal Spaces.
- * Version:           1.1.1
+ * Version:           1.1.2
  * Author:            Madeleine Clark Wallace Library
  * License:           GPL-2.0+
  * Requires at least: 5.6
@@ -761,6 +761,8 @@ function mcw_rooms_widget_markup() {
   #mcw-rooms .mcw-rooms__legend{font-size:.8rem;color:var(--muted);margin-top:8px}
   #mcw-rooms .mcw-rooms__kbd{margin:0 0 10px}
   #mcw-rooms .mcw-rooms__legend b{display:inline-block;width:12px;height:12px;vertical-align:-2px;border:1px solid var(--line)}
+  #mcw-rooms .mcw-rooms__legend b.is-free{background:var(--free)}
+  #mcw-rooms .mcw-rooms__legend b.is-taken{background:var(--taken)}
   #mcw-rooms-form{max-width:420px;margin-top:16px}
   #mcw-rooms-form .fld{margin:10px 0}
   #mcw-rooms-form label{display:block;font-weight:600;margin-bottom:3px}
@@ -841,7 +843,7 @@ function renderGrid(){
     html+='</tr>';
   });
   html+='</tbody></table></div>'
-    +'<p class="mcw-rooms__legend"><b style="background:#bfe6cb"></b> <strong>Green = available</strong> — click or press Enter on a green square to book &nbsp;&nbsp; <b style="background:#c9cccf"></b> grey = unavailable</p>'
+    +'<p class="mcw-rooms__legend"><b class="is-free" aria-hidden="true"></b> <strong>Green = available</strong> — click or press Enter on a green square to book &nbsp;&nbsp; <b class="is-taken" aria-hidden="true"></b> grey = unavailable</p>'
     +(a.dailyMaxMin>0?'<p class="mcw-rooms__legend">Each person may book up to '+esc(fmtMins(a.dailyMaxMin))+' per day across all rooms.</p>':'');
   gridEl.innerHTML=html;
   // Roving tabindex + 2-D arrow-key navigation over the available (green) cells.

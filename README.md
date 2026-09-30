@@ -17,6 +17,12 @@ Download the latest release zip, then in wp-admin: **Plugins → Add New → Upl
 
 This project uses [Semantic Versioning](https://semver.org/).
 
+### 1.1.2
+- The grid legend's green and grey swatches take their colors from the
+  stylesheet instead of inline styles, and are hidden from screen readers
+  (the text beside them already says what they mean). Clears two pa11y
+  "inline background colour" warnings; looks the same.
+
 ### 1.1.1
 - Drop "MCW" from the plugin's display name (now just "Reserve a Room").
   Cosmetic only; internal code identifiers, the option name, and the
