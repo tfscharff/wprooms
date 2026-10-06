@@ -17,6 +17,12 @@ Download the latest release zip, then in wp-admin: **Plugins → Add New → Upl
 
 This project uses [Semantic Versioning](https://semver.org/).
 
+### 1.1.3
+- The "i" beside a room name is now a button: click, tap, Enter or Space
+  shows the room's note under its name, and Esc or another click hides it.
+  The note used to be a hover-only tooltip, which didn't show in Firefox,
+  on phones, or from the keyboard.
+
 ### 1.1.2
 - The grid legend's green and grey swatches take their colors from the
   stylesheet instead of inline styles, and are hidden from screen readers

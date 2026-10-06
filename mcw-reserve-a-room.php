@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       Reserve a Room
  * Description:        No-code study-room booking: staff manage rooms and rules under Reserve a Room in wp-admin; patrons book instantly with [reserve_a_room]. Bookable hours come from the Library Hours plugin. Replaces LibCal Spaces.
- * Version:           1.1.2
+ * Version:           1.1.3
  * Author:            Madeleine Clark Wallace Library
  * License:           GPL-2.0+
  * Requires at least: 5.6
@@ -750,7 +750,10 @@ function mcw_rooms_widget_markup() {
   #mcw-rooms th.mcw-rooms__room{text-align:left;position:sticky;left:0;z-index:2;background:#f6f8fa;min-width:150px}
   #mcw-rooms th.mcw-rooms__rowhead{text-align:left;position:sticky;left:0;z-index:1;background:#fff;font-weight:600;padding:4px 6px;white-space:nowrap;min-width:150px}
   #mcw-rooms .mcw-rooms__rhwrap{display:flex;align-items:center;gap:8px}
-  #mcw-rooms .mcw-rooms__info{margin-left:auto;flex:0 0 auto;width:16px;height:16px;line-height:16px;text-align:center;border-radius:50%;background:var(--accent);color:#fff;font-size:11px;font-weight:700;font-style:normal;cursor:help}
+  #mcw-rooms .mcw-rooms__info{margin-left:auto;flex:0 0 auto;width:16px;height:16px;line-height:16px;padding:0;border:0;text-align:center;border-radius:50%;background:var(--accent);color:#fff;font-family:inherit;font-size:11px;font-weight:700;font-style:normal;cursor:pointer}
+  #mcw-rooms .mcw-rooms__info:focus-visible{outline:2px solid #003b71;outline-offset:2px}
+  #mcw-rooms .mcw-rooms__notetext{display:block;max-width:220px;margin-top:4px;white-space:normal;font-weight:400;color:#1a1a1a}
+  #mcw-rooms .mcw-rooms__notetext[hidden]{display:none}
   #mcw-rooms .mcw-sr{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
   #mcw-rooms .slot{width:100%;min-width:52px;height:34px;display:block}
   #mcw-rooms .slot.free{background:var(--free);cursor:pointer}
@@ -786,6 +789,7 @@ var gridEl=document.getElementById("mcw-rooms-grid"), formEl=document.getElement
 var dateEl=document.getElementById("mcw-rooms-date");
 var fmt24Btn=document.getElementById("mcw-rooms-fmt24"), fmt12Btn=document.getElementById("mcw-rooms-fmt12");
 var AVAIL=null, fmt12=false; // display-only; all data/requests/emails stay 24h "HH:MM"
+var notesShown={}; // room id -> true while its note is open, so a redraw keeps it open
 function esc(x){return String(x==null?"":x).replace(/[&<>"']/g,function(c){return{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];});}
 function pad(n){return n<10?"0"+n:""+n;}
 function todayStr(){var d=new Date();return d.getFullYear()+"-"+pad(d.getMonth()+1)+"-"+pad(d.getDate());}
@@ -832,8 +836,12 @@ function renderGrid(){
   html+='</tr></thead><tbody>';
   a.rooms.forEach(function(room,ri){
     var taken=(a.taken&&a.taken[room.id])||[];
-    var info=room.notes?'<span class="mcw-rooms__info" role="img" aria-label="Note: '+esc(room.notes)+'" title="'+esc(room.notes)+'">i</span>':'';
-    html+='<tr><th scope="row" class="mcw-rooms__rowhead"><span class="mcw-rooms__rhwrap"><span>'+esc(room.name)+'</span>'+info+'</span></th>';
+    // The "i" is a disclosure button: click, tap, Enter or Space shows the
+    // note under the room name; Esc hides it again.
+    var noteId="mcw-rooms-note-"+ri, shown=!!notesShown[room.id];
+    var info=room.notes?'<button type="button" class="mcw-rooms__info" data-room="'+esc(room.id)+'" aria-expanded="'+shown+'" aria-controls="'+noteId+'" aria-label="Details for '+esc(room.name)+'">i</button>':'';
+    var note=room.notes?'<span class="mcw-rooms__notetext" id="'+noteId+'"'+(shown?'':' hidden')+'>'+esc(room.notes)+'</span>':'';
+    html+='<tr><th scope="row" class="mcw-rooms__rowhead"><span class="mcw-rooms__rhwrap"><span>'+esc(room.name)+'</span>'+info+'</span>'+note+'</th>';
     cols.forEach(function(s,ci){
       var isTaken=taken.indexOf(s)>-1;
       var past=(a.nowMin!=null)&&(hhmm2m(s)<a.nowMin);
@@ -846,6 +854,15 @@ function renderGrid(){
     +'<p class="mcw-rooms__legend"><b class="is-free" aria-hidden="true"></b> <strong>Green = available</strong> — click or press Enter on a green square to book &nbsp;&nbsp; <b class="is-taken" aria-hidden="true"></b> grey = unavailable</p>'
     +(a.dailyMaxMin>0?'<p class="mcw-rooms__legend">Each person may book up to '+esc(fmtMins(a.dailyMaxMin))+' per day across all rooms.</p>':'');
   gridEl.innerHTML=html;
+  [].forEach.call(gridEl.querySelectorAll(".mcw-rooms__info"),function(btn){
+    var note=document.getElementById(btn.getAttribute("aria-controls"));
+    function show(on){
+      btn.setAttribute("aria-expanded",on?"true":"false");note.hidden=!on;
+      if(on)notesShown[btn.getAttribute("data-room")]=true;else delete notesShown[btn.getAttribute("data-room")];
+    }
+    btn.addEventListener("click",function(){show(note.hidden);});
+    btn.addEventListener("keydown",function(e){if(e.key==="Escape"&&!note.hidden){e.preventDefault();show(false);}});
+  });
   // Roving tabindex + 2-D arrow-key navigation over the available (green) cells.
   var frees=[].slice.call(gridEl.querySelectorAll(".slot.free"));
   var map={};
