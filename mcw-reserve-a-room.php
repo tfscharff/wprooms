@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       Reserve a Room
  * Description:        No-code study-room booking: staff manage rooms and rules under Reserve a Room in wp-admin; patrons book instantly with [reserve_a_room]. Bookable hours come from the Library Hours plugin. Replaces LibCal Spaces.
- * Version:           1.1.3
+ * Version:           1.2.0
  * Author:            Madeleine Clark Wallace Library
  * License:           GPL-2.0+
  * Requires at least: 5.6
@@ -55,7 +55,7 @@ function mcw_rooms_install() {
 
 function mcw_rooms_defaults() {
 	return array(
-		'rules' => array( 'slotMin' => 30, 'maxMin' => 120, 'advanceDays' => 14, 'dailyMaxMin' => 0 ),
+		'rules' => array( 'slotMin' => 30, 'maxMin' => 120, 'advanceDays' => 14, 'dailyMaxMin' => 0, 'timeFormat' => '24', 'emailDomains' => array() ),
 		'rooms' => array(
 			array( 'id' => 'r1', 'name' => 'Study Room 1', 'capacity' => 4, 'notes' => '' ),
 			array( 'id' => 'r2', 'name' => 'Study Room 2', 'capacity' => 4, 'notes' => '' ),
@@ -107,6 +107,10 @@ function mcw_rooms_sanitize( $in ) {
 		$daily = 0;
 	}
 	$out['rules']['dailyMaxMin'] = $daily;
+	// Default time display in the booking widget: '24' or '12'. Patrons can still toggle.
+	$out['rules']['timeFormat'] = ( isset( $r['timeFormat'] ) && '12' === (string) $r['timeFormat'] ) ? '12' : '24';
+	// Allowed email domains (empty = anyone). Accepts an array or a comma/space/newline-separated string.
+	$out['rules']['emailDomains'] = mcw_rooms_sanitize_domains( isset( $r['emailDomains'] ) ? $r['emailDomains'] : array() );
 
 	$rooms = isset( $in['rooms'] ) && is_array( $in['rooms'] ) ? $in['rooms'] : array();
 	$used  = array();
@@ -129,6 +133,39 @@ function mcw_rooms_sanitize( $in ) {
 		);
 	}
 	return $out;
+}
+
+/** Normalize a list of email domains: lowercase, strip a leading "@", drop invalid entries and duplicates. */
+function mcw_rooms_sanitize_domains( $in ) {
+	$list = is_array( $in ) ? $in : preg_split( '/[\s,;]+/', (string) $in );
+	$out  = array();
+	foreach ( $list as $d ) {
+		$d = ltrim( strtolower( trim( (string) $d ) ), '@' );
+		if ( preg_match( '/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/', $d ) && ! in_array( $d, $out, true ) ) {
+			$out[] = $d;
+		}
+	}
+	return $out;
+}
+
+/** True if $email's domain is one of $domains or a subdomain of one. An empty list allows any email. */
+function mcw_rooms_email_domain_allowed( $email, $domains ) {
+	if ( empty( $domains ) ) { return true; }
+	$at = strrpos( (string) $email, '@' );
+	if ( false === $at ) { return false; }
+	$host = strtolower( substr( $email, $at + 1 ) );
+	foreach ( $domains as $d ) {
+		if ( $host === $d || substr( $host, -strlen( '.' . $d ) ) === '.' . $d ) { return true; }
+	}
+	return false;
+}
+
+/** "@a.edu", "@a.edu or @b.edu", "@a.edu, @b.edu, or @c.edu" */
+function mcw_rooms_domains_phrase( $domains ) {
+	$d = array_map( function ( $x ) { return '@' . $x; }, $domains );
+	if ( count( $d ) < 3 ) { return implode( ' or ', $d ); }
+	$last = array_pop( $d );
+	return implode( ', ', $d ) . ', or ' . $last;
 }
 
 /* ------------------------------------------------------------------ *
@@ -387,6 +424,10 @@ function mcw_rooms_reserve( WP_REST_Request $req ) {
 	if ( ! is_email( $email ) ) {
 		return new WP_Error( 'mcw_email', 'Please enter a valid email address.', array( 'status' => 400 ) );
 	}
+	$domains = mcw_rooms_get()['rules']['emailDomains'];
+	if ( ! mcw_rooms_email_domain_allowed( $email, $domains ) ) {
+		return new WP_Error( 'mcw_email_domain', 'Reservations are limited to ' . mcw_rooms_domains_phrase( $domains ) . ' email addresses.', array( 'status' => 400 ) );
+	}
 	if ( ! preg_match( '/^\d{4}-\d{2}-\d{2}$/', $date ) || ! preg_match( '/^\d{2}:\d{2}$/', $start ) ) {
 		return new WP_Error( 'mcw_input', 'Invalid reservation details.', array( 'status' => 400 ) );
 	}
@@ -584,6 +625,10 @@ function mcw_rooms_editor_markup() {
   #mcwrm .rules{display:flex;gap:16px;flex-wrap:wrap;align-items:end}
   #mcwrm .rules label{font-weight:600;color:#1a1a1a}
   #mcwrm .rules input{width:90px}
+  #mcwrm select{font:inherit;padding:5px 8px;border:1px solid var(--line);border-radius:6px}
+  #mcwrm .domains{margin-top:14px}
+  #mcwrm .domains label{color:#1a1a1a}
+  #mcwrm textarea{width:100%;max-width:420px;font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:6px;box-sizing:border-box}
   #mcwrm .bar{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:8px}
   #mcwrm .status{font-weight:600}
   #mcwrm .hint{font-size:.82rem;color:var(--muted);margin:6px 0 0}
@@ -595,11 +640,20 @@ function mcw_rooms_editor_markup() {
       <label>Max length (minutes)<br><input type="number" id="mcwrm-max" min="30" step="30"></label>
       <label>Book ahead (days)<br><input type="number" id="mcwrm-adv" min="1" max="90"></label>
       <label>Daily limit per person (minutes)<br><input type="number" id="mcwrm-daily" min="0" max="480" step="30"></label>
+      <label>Default time format<br><select id="mcwrm-fmt"><option value="24">24-hour (14:30)</option><option value="12">12-hour (2:30 PM)</option></select></label>
     </div>
     <p class="hint">Slots are 30 minutes. Max length must be a multiple of 30.</p>
     <p class="hint"><strong>Daily limit</strong> is the total a single person (by email) can book across
       all rooms on one day. Enter <strong>0</strong> for no limit. It can't be lower than the max length
       above — if you enter less, it's raised to match.</p>
+    <p class="hint"><strong>Default time format</strong> is how times first appear in the booking grid.
+      Patrons can still switch between 12h and 24h.</p>
+    <div class="domains">
+      <label for="mcwrm-domains">Allowed email domains</label>
+      <textarea id="mcwrm-domains" rows="3" placeholder="wheatoncollege.edu" aria-describedby="mcwrm-domains-hint"></textarea>
+      <p class="hint" id="mcwrm-domains-hint">One per line (or separated by commas). Only email addresses at these domains — or their
+        subdomains — can book. Leave empty to let anyone book.</p>
+    </div>
   </div>
   <div id="mcwrm-rooms"></div>
   <div class="bar"><button type="button" class="b sec" id="mcwrm-add">+ Add a room</button></div>
@@ -608,7 +662,7 @@ function mcw_rooms_editor_markup() {
 <script>
 (function(){
 "use strict";
-var data={rules:{slotMin:30,maxMin:120,advanceDays:14,dailyMaxMin:0},rooms:[]};
+var data={rules:{slotMin:30,maxMin:120,advanceDays:14,dailyMaxMin:0,timeFormat:"24",emailDomains:[]},rooms:[]};
 function el(t,c){var e=document.createElement(t);if(c)e.className=c;return e;}
 function renderRooms(){
   var wrap=document.getElementById("mcwrm-rooms");wrap.innerHTML="";
@@ -634,6 +688,8 @@ function fillRules(){
   document.getElementById("mcwrm-max").value=data.rules.maxMin;
   document.getElementById("mcwrm-adv").value=data.rules.advanceDays;
   document.getElementById("mcwrm-daily").value=data.rules.dailyMaxMin||0;
+  document.getElementById("mcwrm-fmt").value=data.rules.timeFormat==="12"?"12":"24";
+  document.getElementById("mcwrm-domains").value=(data.rules.emailDomains||[]).join("\n");
 }
 function flash(m,bad){var s=document.getElementById("mcwrm-status");s.textContent=m;s.style.color=bad?"#b42318":"#1a7f37";}
 document.getElementById("mcwrm-add").onclick=function(){data.rooms.push({id:"",name:"",capacity:4,notes:""});renderRooms();};
@@ -642,6 +698,8 @@ document.getElementById("mcwrm-save").onclick=function(){
   data.rules.advanceDays=parseInt(document.getElementById("mcwrm-adv").value||"14",10);
   data.rules.dailyMaxMin=parseInt(document.getElementById("mcwrm-daily").value||"0",10);
   if(!(data.rules.dailyMaxMin>0))data.rules.dailyMaxMin=0;
+  data.rules.timeFormat=document.getElementById("mcwrm-fmt").value;
+  data.rules.emailDomains=document.getElementById("mcwrm-domains").value.split(/[\s,;]+/).filter(Boolean);
   flash("Saving…");
   fetch(MCW_ROOMS.root,{method:"POST",headers:{"Content-Type":"application/json","X-WP-Nonce":MCW_ROOMS.nonce},body:JSON.stringify(data)})
     .then(function(r){if(!r.ok)throw 0;return r.json();})
@@ -716,6 +774,9 @@ function mcw_rooms_shortcode( $atts ) {
 		'reserveUrl' => esc_url_raw( rest_url( 'mcw-rooms/v1/reserve' ) ),
 		'nonce'      => wp_create_nonce( 'wp_rest' ),
 	);
+	$rules          = mcw_rooms_get()['rules'];
+	$cfg['fmt12']   = ( '12' === $rules['timeFormat'] );
+	$cfg['domains'] = array_values( $rules['emailDomains'] );
 	$config_js = '<script>window.MCW_ROOMS_CFG=' . wp_json_encode( $cfg ) . ';</script>';
 	return mcw_rooms_widget_markup() . $config_js . mcw_rooms_widget_script();
 }
@@ -771,6 +832,7 @@ function mcw_rooms_widget_markup() {
   #mcw-rooms-form label{display:block;font-weight:600;margin-bottom:3px}
   #mcw-rooms-form input,#mcw-rooms-form select{width:100%;font:inherit;padding:8px 10px;border:1px solid var(--line);border-radius:6px;box-sizing:border-box}
   #mcw-rooms-form .err{color:#b42318;font-size:.85rem;margin-top:3px}
+  #mcw-rooms-form .hint{color:var(--muted);font-size:.85rem;margin-top:3px}
   #mcw-rooms-form .go{background:var(--accent);color:#fff;border:0;padding:10px 18px;border-radius:7px;font-weight:600;cursor:pointer}
   #mcw-rooms-form .cancel{background:none;border:0;color:var(--muted);text-decoration:underline;cursor:pointer;margin-left:10px}
   #mcw-rooms-form .note{background:#eef4fb;border:1px solid #cfe0f2;border-radius:8px;padding:12px 14px;margin-bottom:14px}
@@ -807,6 +869,18 @@ function setFmt(is12){
   fmt24Btn.classList.toggle("on",!is12);fmt24Btn.setAttribute("aria-pressed",is12?"false":"true");
   if(AVAIL)renderGrid();
   if(curOpen)openForm(curOpen.roomId,curOpen.start);
+}
+if(CFG.fmt12)setFmt(true); // admin-chosen default; patrons can still toggle
+var DOMAINS=CFG.domains||[]; // allowed email domains (empty = anyone); the server enforces this too
+function domainOk(email){
+  if(!DOMAINS.length)return true;
+  var host=email.slice(email.lastIndexOf("@")+1).toLowerCase();
+  return DOMAINS.some(function(d){return host===d||host.slice(-(d.length+1))==="."+d;});
+}
+function domainsPhrase(){
+  var d=DOMAINS.map(function(x){return "@"+x;});
+  if(d.length<3)return d.join(" or ");
+  return d.slice(0,-1).join(", ")+", or "+d[d.length-1];
 }
 fmt24Btn.addEventListener("click",function(){setFmt(false);});
 fmt12Btn.addEventListener("click",function(){setFmt(true);});
@@ -904,7 +978,7 @@ function openForm(roomId,start){
     +'<div class="fld"><label for="mcw-rf-dur">Length</label><select id="mcw-rf-dur">'+opts+'</select></div>'
     +'<div class="fld"><label for="mcw-rf-first">First name</label><input type="text" id="mcw-rf-first" autocomplete="given-name" aria-describedby="mcw-rf-first-e"><div class="err" id="mcw-rf-first-e" data-e="first" role="alert"></div></div>'
     +'<div class="fld"><label for="mcw-rf-last">Last name</label><input type="text" id="mcw-rf-last" autocomplete="family-name" aria-describedby="mcw-rf-last-e"><div class="err" id="mcw-rf-last-e" data-e="last" role="alert"></div></div>'
-    +'<div class="fld"><label for="mcw-rf-email">Email</label><input type="email" id="mcw-rf-email" autocomplete="email" aria-describedby="mcw-rf-email-e"><div class="err" id="mcw-rf-email-e" data-e="email" role="alert"></div></div>'
+    +'<div class="fld"><label for="mcw-rf-email">Email</label><input type="email" id="mcw-rf-email" autocomplete="email" aria-describedby="'+(DOMAINS.length?'mcw-rf-email-h ':'')+'mcw-rf-email-e">'+(DOMAINS.length?'<div class="hint" id="mcw-rf-email-h">Use your '+esc(domainsPhrase())+' address.</div>':'')+'<div class="err" id="mcw-rf-email-e" data-e="email" role="alert"></div></div>'
     +'<input type="text" name="mcw_hp" style="display:none" tabindex="-1" autocomplete="off" aria-hidden="true">'
     +'<button type="submit" class="go">Reserve</button><button type="button" class="cancel" id="mcw-rf-cancel">Cancel</button></form>';
   formEl.scrollIntoView({behavior:"smooth",block:"start"});
@@ -922,6 +996,7 @@ function submit(roomId,start){
   if(!first){err("first","Required.");ok=false;firstBad=firstBad||"mcw-rf-first";}
   if(!last){err("last","Required.");ok=false;firstBad=firstBad||"mcw-rf-last";}
   if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)){err("email","Enter a valid email.");ok=false;firstBad=firstBad||"mcw-rf-email";}
+  else if(!domainOk(email)){err("email","Use an "+domainsPhrase()+" email address.");ok=false;firstBad=firstBad||"mcw-rf-email";}
   if(!ok){if(firstBad){document.getElementById(firstBad).focus();}return;}
   var fd=new FormData();
   fd.append("_wpnonce",CFG.nonce);fd.append("mcw_hp",(formEl.querySelector('[name=mcw_hp]')||{}).value||"");

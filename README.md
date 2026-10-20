@@ -6,6 +6,8 @@ shortcode. Bookable hours come from the [Library Hours](https://github.com/tfsch
 plugin. Replaces LibCal Spaces.
 
 - Per-room booking rules, including an optional daily booking limit per patron
+- Optionally restrict bookings to one or more email domains
+- Choose whether the booking grid shows 12-hour or 24-hour times by default
 - Confirmation and cancellation emails
 - Stores bookings in a dedicated database table
 
@@ -16,6 +18,16 @@ Download the latest release zip, then in wp-admin: **Plugins → Add New → Upl
 ## Changelog
 
 This project uses [Semantic Versioning](https://semver.org/).
+
+### 1.2.0
+- New **Default time format** setting under Rules: choose whether the
+  booking grid opens in 24-hour or 12-hour time. Patrons can still switch
+  with the 12h/24h toggle.
+- New **Allowed email domains** setting: list one or more domains (one per
+  line or comma-separated) and only email addresses at those domains, or
+  their subdomains, can book. Leave it empty to let anyone book. Checked on
+  the server; the booking form also shows which domains are accepted and
+  flags a non-matching address before submitting.
 
 ### 1.1.3
 - The "i" beside a room name is now a button: click, tap, Enter or Space
