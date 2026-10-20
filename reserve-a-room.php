@@ -2,8 +2,8 @@
 /**
  * Plugin Name:       Reserve a Room
  * Description:        No-code study-room booking: staff manage rooms and rules under Reserve a Room in wp-admin; patrons book instantly with [reserve_a_room]. Bookable hours come from the Library Hours plugin. Replaces LibCal Spaces.
- * Version:           1.2.0
- * Author:            Madeleine Clark Wallace Library
+ * Version:           2.0.0
+ * Author:            Thomas Scharff
  * License:           GPL-2.0+
  * Requires at least: 5.6
  * Requires PHP:      7.2
@@ -11,23 +11,23 @@
 
 if ( ! defined( 'ABSPATH' ) ) { exit; }
 
-define( 'MCW_ROOMS_OPTION', 'mcw_rooms' );
+define( 'RAR_OPTION', 'rar_rooms' );
 // Version is single-sourced from the plugin header above (SemVer 2.0.0), read via
 // get_file_data() so the constant can never drift from the canonical Version: field.
-define( 'MCW_ROOMS_VERSION', get_file_data( __FILE__, array( 'Version' => 'Version' ) )['Version'] );
-define( 'MCW_ROOMS_DB_VERSION', '1' );
-define( 'MCW_ROOMS_REPLY_TO', 'library@wheatoncollege.edu' );
+define( 'RAR_VERSION', get_file_data( __FILE__, array( 'Version' => 'Version' ) )['Version'] );
+define( 'RAR_DB_VERSION', '1' );
+define( 'RAR_REPLY_TO', 'library@wheatoncollege.edu' );
 
-function mcw_rooms_table() {
+function rar_table() {
 	global $wpdb;
-	return $wpdb->prefix . 'mcw_room_slots';
+	return $wpdb->prefix . 'rar_slots';
 }
 
-register_activation_hook( __FILE__, 'mcw_rooms_install' );
+register_activation_hook( __FILE__, 'rar_install' );
 
-function mcw_rooms_install() {
+function rar_install() {
 	global $wpdb;
-	$table   = mcw_rooms_table();
+	$table   = rar_table();
 	$charset = $wpdb->get_charset_collate();
 	// One row per occupied 30-min slot. UNIQUE(room_id, slot_start) makes double-booking impossible.
 	$sql = "CREATE TABLE {$table} (
@@ -44,16 +44,50 @@ function mcw_rooms_install() {
 		KEY booking_id (booking_id),
 		KEY slot_start (slot_start)
 	) {$charset};";
+	rar_migrate_legacy();
 	require_once ABSPATH . 'wp-admin/includes/upgrade.php';
 	dbDelta( $sql );
-	update_option( 'mcw_rooms_db_version', MCW_ROOMS_DB_VERSION );
+	update_option( 'rar_db_version', RAR_DB_VERSION );
 }
+
+/**
+ * One-time move of data saved by versions before 2.0.0, which used an "mcw" prefix
+ * (mcw_rooms option, {prefix}mcw_room_slots table). Safe to run repeatedly.
+ */
+function rar_migrate_legacy() {
+	global $wpdb;
+	$old = $wpdb->prefix . 'mcw_room_slots';
+	$new = rar_table();
+	if ( $old === $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $old ) ) ) ) {
+		if ( $new !== $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $new ) ) ) ) {
+			$wpdb->query( "RENAME TABLE `{$old}` TO `{$new}`" ); // phpcs:ignore WordPress.DB.PreparedSQL
+		} else {
+			$cols = 'booking_id, room_id, slot_start, first, last, email, created_at';
+			// phpcs:ignore WordPress.DB.PreparedSQL
+			if ( false !== $wpdb->query( "INSERT IGNORE INTO `{$new}` ({$cols}) SELECT {$cols} FROM `{$old}`" ) ) {
+				$wpdb->query( "DROP TABLE `{$old}`" ); // phpcs:ignore WordPress.DB.PreparedSQL
+			}
+		}
+	}
+	$rooms = get_option( 'mcw_rooms' );
+	if ( false !== $rooms ) {
+		if ( false === get_option( RAR_OPTION ) ) { add_option( RAR_OPTION, $rooms ); }
+		delete_option( 'mcw_rooms' );
+	}
+	delete_option( 'mcw_rooms_db_version' );
+}
+
+// Also run install/migration on load when the stored schema version is behind,
+// since the activation hook doesn't fire for every way a plugin gets updated.
+add_action( 'plugins_loaded', function () {
+	if ( get_option( 'rar_db_version' ) !== RAR_DB_VERSION ) { rar_install(); }
+} );
 
 /* ------------------------------------------------------------------ *
  *  Rooms + rules config
  * ------------------------------------------------------------------ */
 
-function mcw_rooms_defaults() {
+function rar_defaults() {
 	return array(
 		'rules' => array( 'slotMin' => 30, 'maxMin' => 120, 'advanceDays' => 14, 'dailyMaxMin' => 0, 'timeFormat' => '24', 'emailDomains' => array() ),
 		'rooms' => array(
@@ -63,16 +97,16 @@ function mcw_rooms_defaults() {
 	);
 }
 
-function mcw_rooms_get() {
-	$v = get_option( MCW_ROOMS_OPTION );
-	if ( empty( $v ) || ! is_array( $v ) ) { $v = mcw_rooms_defaults(); }
+function rar_get() {
+	$v = get_option( RAR_OPTION );
+	if ( empty( $v ) || ! is_array( $v ) ) { $v = rar_defaults(); }
 	if ( ! isset( $v['rules'] ) || ! is_array( $v['rules'] ) ) {
-		$d           = mcw_rooms_defaults();
+		$d           = rar_defaults();
 		$v['rules']  = $d['rules'];
 	}
 	if ( ! isset( $v['rooms'] ) || ! is_array( $v['rooms'] ) ) { $v['rooms'] = array(); }
 	// Fill in rules added after the option was first stored.
-	$d = mcw_rooms_defaults();
+	$d = rar_defaults();
 	foreach ( $d['rules'] as $k => $def ) {
 		if ( ! isset( $v['rules'][ $k ] ) ) { $v['rules'][ $k ] = $def; }
 	}
@@ -80,14 +114,14 @@ function mcw_rooms_get() {
 }
 
 /** Generate a stable, unique room id. Must be collision-proof even when many rooms are saved at once. */
-function mcw_rooms_new_id() {
+function rar_new_id() {
 	if ( function_exists( 'random_bytes' ) ) {
 		return 'r' . bin2hex( random_bytes( 6 ) );
 	}
 	return 'r' . substr( md5( uniqid( (string) wp_rand(), true ) ), 0, 12 );
 }
 
-function mcw_rooms_sanitize( $in ) {
+function rar_sanitize( $in ) {
 	$out = array( 'rules' => array(), 'rooms' => array() );
 	$r   = isset( $in['rules'] ) && is_array( $in['rules'] ) ? $in['rules'] : array();
 	$out['rules']['slotMin']     = 30; // fixed grid granularity
@@ -110,7 +144,7 @@ function mcw_rooms_sanitize( $in ) {
 	// Default time display in the booking widget: '24' or '12'. Patrons can still toggle.
 	$out['rules']['timeFormat'] = ( isset( $r['timeFormat'] ) && '12' === (string) $r['timeFormat'] ) ? '12' : '24';
 	// Allowed email domains (empty = anyone). Accepts an array or a comma/space/newline-separated string.
-	$out['rules']['emailDomains'] = mcw_rooms_sanitize_domains( isset( $r['emailDomains'] ) ? $r['emailDomains'] : array() );
+	$out['rules']['emailDomains'] = rar_sanitize_domains( isset( $r['emailDomains'] ) ? $r['emailDomains'] : array() );
 
 	$rooms = isset( $in['rooms'] ) && is_array( $in['rooms'] ) ? $in['rooms'] : array();
 	$used  = array();
@@ -122,7 +156,7 @@ function mcw_rooms_sanitize( $in ) {
 		// Assign a fresh id when missing OR when it collides with another room in this batch
 		// (self-heals rooms that were saved with a duplicate id by an earlier version).
 		if ( '' === $id || isset( $used[ $id ] ) ) {
-			do { $id = mcw_rooms_new_id(); } while ( isset( $used[ $id ] ) );
+			do { $id = rar_new_id(); } while ( isset( $used[ $id ] ) );
 		}
 		$used[ $id ] = true;
 		$out['rooms'][] = array(
@@ -136,7 +170,7 @@ function mcw_rooms_sanitize( $in ) {
 }
 
 /** Normalize a list of email domains: lowercase, strip a leading "@", drop invalid entries and duplicates. */
-function mcw_rooms_sanitize_domains( $in ) {
+function rar_sanitize_domains( $in ) {
 	$list = is_array( $in ) ? $in : preg_split( '/[\s,;]+/', (string) $in );
 	$out  = array();
 	foreach ( $list as $d ) {
@@ -149,7 +183,7 @@ function mcw_rooms_sanitize_domains( $in ) {
 }
 
 /** True if $email's domain is one of $domains or a subdomain of one. An empty list allows any email. */
-function mcw_rooms_email_domain_allowed( $email, $domains ) {
+function rar_email_domain_allowed( $email, $domains ) {
 	if ( empty( $domains ) ) { return true; }
 	$at = strrpos( (string) $email, '@' );
 	if ( false === $at ) { return false; }
@@ -161,7 +195,7 @@ function mcw_rooms_email_domain_allowed( $email, $domains ) {
 }
 
 /** "@a.edu", "@a.edu or @b.edu", "@a.edu, @b.edu, or @c.edu" */
-function mcw_rooms_domains_phrase( $domains ) {
+function rar_domains_phrase( $domains ) {
 	$d = array_map( function ( $x ) { return '@' . $x; }, $domains );
 	if ( count( $d ) < 3 ) { return implode( ' or ', $d ); }
 	$last = array_pop( $d );
@@ -172,32 +206,32 @@ function mcw_rooms_domains_phrase( $domains ) {
  *  Time / hours / slot helpers
  * ------------------------------------------------------------------ */
 
-function mcw_room_hhmm2min( $t ) {
+function rar_hhmm2min( $t ) {
 	$a = explode( ':', (string) $t );
 	return ( (int) $a[0] ) * 60 + ( isset( $a[1] ) ? (int) $a[1] : 0 );
 }
-function mcw_room_min2hhmm( $m ) {
+function rar_min2hhmm( $m ) {
 	$m = (int) $m;
 	return sprintf( '%02d:%02d', intdiv( $m, 60 ), $m % 60 );
 }
 
-function mcw_rooms_hours_option() {
+function rar_hours_option() {
 	$h = get_option( 'mcw_library_hours' );
 	return is_array( $h ) ? $h : null;
 }
 
-function mcw_rooms_tz() {
-	$h  = mcw_rooms_hours_option();
+function rar_tz() {
+	$h  = rar_hours_option();
 	$tz = ( $h && ! empty( $h['timezone'] ) ) ? $h['timezone'] : 'America/New_York';
 	return in_array( $tz, timezone_identifiers_list(), true ) ? $tz : 'America/New_York';
 }
 
-function mcw_rooms_now() {
-	return new DateTime( 'now', new DateTimeZone( mcw_rooms_tz() ) );
+function rar_now() {
+	return new DateTime( 'now', new DateTimeZone( rar_tz() ) );
 }
 
 /** Keep only well-formed {open,close} blocks from a day's list. */
-function mcw_room_normalize_blocks( $blocks ) {
+function rar_normalize_blocks( $blocks ) {
 	$out = array();
 	if ( ! is_array( $blocks ) ) { return $out; }
 	foreach ( $blocks as $b ) {
@@ -214,8 +248,8 @@ function mcw_room_normalize_blocks( $blocks ) {
  * (building) schedule — guest hours are intentionally ignored for room booking.
  * Returns [] if the hours plugin is missing or the day is closed.
  */
-function mcw_room_open_blocks( $date ) {
-	$h = mcw_rooms_hours_option();
+function rar_open_blocks( $date ) {
+	$h = rar_hours_option();
 	if ( ! $h ) { return array(); }
 
 	// 1. A single-date exception overrides everything.
@@ -223,10 +257,10 @@ function mcw_room_open_blocks( $date ) {
 	if ( isset( $exc[ $date ] ) && is_array( $exc[ $date ] ) ) {
 		$e = $exc[ $date ];
 		if ( isset( $e['closed'] ) && $e['closed'] ) { return array(); }
-		return mcw_room_normalize_blocks( $e );
+		return rar_normalize_blocks( $e );
 	}
 
-	$dow = (string) (int) ( new DateTime( $date, new DateTimeZone( mcw_rooms_tz() ) ) )->format( 'w' );
+	$dow = (string) (int) ( new DateTime( $date, new DateTimeZone( rar_tz() ) ) )->format( 'w' );
 
 	// 2. The first term range covering this date overrides the weekly default.
 	$ranges = isset( $h['ranges'] ) && is_array( $h['ranges'] ) ? $h['ranges'] : array();
@@ -234,26 +268,26 @@ function mcw_room_open_blocks( $date ) {
 		if ( ! is_array( $r ) || empty( $r['start'] ) || empty( $r['end'] ) ) { continue; }
 		if ( $date >= $r['start'] && $date <= $r['end'] ) {
 			$rw = isset( $r['weekly'] ) && is_array( $r['weekly'] ) ? $r['weekly'] : array();
-			return mcw_room_normalize_blocks( isset( $rw[ $dow ] ) ? $rw[ $dow ] : array() );
+			return rar_normalize_blocks( isset( $rw[ $dow ] ) ? $rw[ $dow ] : array() );
 		}
 	}
 
 	// 3. Weekly default.
 	$weekly = isset( $h['weekly'] ) && is_array( $h['weekly'] ) ? $h['weekly'] : array();
-	return mcw_room_normalize_blocks( isset( $weekly[ $dow ] ) ? $weekly[ $dow ] : array() );
+	return rar_normalize_blocks( isset( $weekly[ $dow ] ) ? $weekly[ $dow ] : array() );
 }
 
 /**
  * Candidate 30-min slot starts ('HH:MM') that fit fully inside an open block.
  * A slot occupies [start, start+30); the last slot in a block ends exactly at close.
  */
-function mcw_room_candidate_slots( $date ) {
+function rar_candidate_slots( $date ) {
 	$slots = array();
-	foreach ( mcw_room_open_blocks( $date ) as $b ) {
-		$o = mcw_room_hhmm2min( $b['open'] );
-		$c = mcw_room_hhmm2min( $b['close'] );          // "24:00" => 1440
+	foreach ( rar_open_blocks( $date ) as $b ) {
+		$o = rar_hhmm2min( $b['open'] );
+		$c = rar_hhmm2min( $b['close'] );          // "24:00" => 1440
 		for ( $m = $o; $m + 30 <= $c; $m += 30 ) {
-			$slots[] = mcw_room_min2hhmm( $m );
+			$slots[] = rar_min2hhmm( $m );
 		}
 	}
 	$slots = array_values( array_unique( $slots ) );
@@ -266,9 +300,9 @@ function mcw_room_candidate_slots( $date ) {
  * ------------------------------------------------------------------ */
 
 /** Map of room_id => list of taken 'HH:MM' starts on a date. */
-function mcw_rooms_taken_for_date( $date ) {
+function rar_taken_for_date( $date ) {
 	global $wpdb;
-	$table = mcw_rooms_table();
+	$table = rar_table();
 	$rows  = $wpdb->get_results( $wpdb->prepare(
 		"SELECT room_id, DATE_FORMAT(slot_start, '%%H:%%i') AS hhmm FROM {$table} WHERE DATE(slot_start) = %s",
 		$date
@@ -284,75 +318,75 @@ function mcw_rooms_taken_for_date( $date ) {
 }
 
 add_action( 'rest_api_init', function () {
-	register_rest_route( 'mcw-rooms/v1', '/config', array(
+	register_rest_route( 'reserve-a-room/v1', '/config', array(
 		'methods'             => 'GET',
 		'permission_callback' => '__return_true',
 		'callback'            => function () {
-			$cfg = mcw_rooms_get();
+			$cfg = rar_get();
 			return rest_ensure_response( array(
 				'rules'      => $cfg['rules'],
 				'rooms'      => array_map( function ( $r ) {
 					return array( 'id' => $r['id'], 'name' => $r['name'], 'capacity' => $r['capacity'], 'notes' => $r['notes'] );
 				}, $cfg['rooms'] ),
-				'hoursReady' => (bool) mcw_rooms_hours_option(),
+				'hoursReady' => (bool) rar_hours_option(),
 			) );
 		},
 	) );
 
-	register_rest_route( 'mcw-rooms/v1', '/availability', array(
+	register_rest_route( 'reserve-a-room/v1', '/availability', array(
 		'methods'             => 'GET',
 		'permission_callback' => '__return_true',
 		'args'                => array( 'date' => array( 'required' => true ) ),
-		'callback'            => 'mcw_rooms_availability',
+		'callback'            => 'rar_availability',
 	) );
 
-	register_rest_route( 'mcw-rooms/v1', '/reserve', array(
+	register_rest_route( 'reserve-a-room/v1', '/reserve', array(
 		'methods'             => 'POST',
 		'permission_callback' => '__return_true', // patrons are not logged in; hardened in the handler
-		'callback'            => 'mcw_rooms_reserve',
+		'callback'            => 'rar_reserve',
 	) );
 
-	register_rest_route( 'mcw-rooms/v1', '/config', array(
+	register_rest_route( 'reserve-a-room/v1', '/config', array(
 		'methods'             => 'POST',
 		'permission_callback' => function () { return current_user_can( 'edit_pages' ); },
 		'callback'            => function ( WP_REST_Request $req ) {
 			$body = $req->get_json_params();
 			if ( ! is_array( $body ) || ! isset( $body['rooms'] ) ) {
-				return new WP_Error( 'mcw_bad', 'Invalid data.', array( 'status' => 400 ) );
+				return new WP_Error( 'rar_bad', 'Invalid data.', array( 'status' => 400 ) );
 			}
-			$clean = mcw_rooms_sanitize( $body );
-			update_option( MCW_ROOMS_OPTION, $clean );
+			$clean = rar_sanitize( $body );
+			update_option( RAR_OPTION, $clean );
 			// Echo the sanitized rules back so the editor shows what was actually stored.
 			return rest_ensure_response( array( 'ok' => true, 'rules' => $clean['rules'] ) );
 		},
 	) );
 } );
 
-function mcw_rooms_availability( WP_REST_Request $req ) {
+function rar_availability( WP_REST_Request $req ) {
 	$date = (string) $req->get_param( 'date' );
 	if ( ! preg_match( '/^\d{4}-\d{2}-\d{2}$/', $date ) ) {
-		return new WP_Error( 'mcw_date', 'Invalid date.', array( 'status' => 400 ) );
+		return new WP_Error( 'rar_date', 'Invalid date.', array( 'status' => 400 ) );
 	}
-	if ( ! mcw_rooms_hours_option() ) {
-		return new WP_Error( 'mcw_hours', 'Room booking is temporarily unavailable.', array( 'status' => 503 ) );
+	if ( ! rar_hours_option() ) {
+		return new WP_Error( 'rar_hours', 'Room booking is temporarily unavailable.', array( 'status' => 503 ) );
 	}
-	$cfg   = mcw_rooms_get();
-	$now   = mcw_rooms_now();
+	$cfg   = rar_get();
+	$now   = rar_now();
 	$today = $now->format( 'Y-m-d' );
 	$max   = ( clone $now )->modify( '+' . (int) $cfg['rules']['advanceDays'] . ' days' )->format( 'Y-m-d' );
 	if ( $date < $today || $date > $max ) {
-		return new WP_Error( 'mcw_window', 'That date is outside the booking window.', array( 'status' => 400 ) );
+		return new WP_Error( 'rar_window', 'That date is outside the booking window.', array( 'status' => 400 ) );
 	}
 	$nowMin = ( $date === $today ) ? ( (int) $now->format( 'G' ) * 60 + (int) $now->format( 'i' ) ) : null;
 	return rest_ensure_response( array(
 		'date'    => $date,
-		'blocks'  => mcw_room_open_blocks( $date ),
-		'slots'   => mcw_room_candidate_slots( $date ),
+		'blocks'  => rar_open_blocks( $date ),
+		'slots'   => rar_candidate_slots( $date ),
 		'slotMin' => (int) $cfg['rules']['slotMin'],
 		'maxMin'  => (int) $cfg['rules']['maxMin'],
 		'dailyMaxMin' => (int) $cfg['rules']['dailyMaxMin'],
 		'rooms'   => array_map( function ( $r ) { return array( 'id' => $r['id'], 'name' => $r['name'], 'notes' => $r['notes'], 'capacity' => $r['capacity'] ); }, $cfg['rooms'] ),
-		'taken'   => mcw_rooms_taken_for_date( $date ),
+		'taken'   => rar_taken_for_date( $date ),
 		'nowMin'  => $nowMin,
 	) );
 }
@@ -362,9 +396,9 @@ function mcw_rooms_availability( WP_REST_Request $req ) {
  * ------------------------------------------------------------------ */
 
 /** Minutes this email already has booked on $date, across all rooms. One row = 30 minutes. */
-function mcw_rooms_booked_minutes_on( $email, $date ) {
+function rar_booked_minutes_on( $email, $date ) {
 	global $wpdb;
-	$table = mcw_rooms_table();
+	$table = rar_table();
 	// Half-open range [date 00:00, next day 00:00). Built with DateTime so the bound never depends
 	// on the server's default timezone.
 	$next = date_create_immutable( $date . ' 00:00:00' );
@@ -379,7 +413,7 @@ function mcw_rooms_booked_minutes_on( $email, $date ) {
 }
 
 /** Human phrasing for a minutes value: "2 hours", "90 minutes", "30 minutes". */
-function mcw_rooms_fmt_minutes( $min ) {
+function rar_fmt_minutes( $min ) {
 	$min = (int) $min;
 	if ( $min > 0 && 0 === $min % 60 ) {
 		$h = intdiv( $min, 60 );
@@ -388,25 +422,25 @@ function mcw_rooms_fmt_minutes( $min ) {
 	return $min . ' minutes';
 }
 
-function mcw_rooms_daily_limit_message( $limit, $already ) {
+function rar_daily_limit_message( $limit, $already ) {
 	$left = max( 0, (int) $limit - (int) $already );
-	$msg  = 'There’s a limit of ' . mcw_rooms_fmt_minutes( $limit ) . ' per person per day, and you already have '
-		. mcw_rooms_fmt_minutes( $already ) . ' booked for that date.';
+	$msg  = 'There’s a limit of ' . rar_fmt_minutes( $limit ) . ' per person per day, and you already have '
+		. rar_fmt_minutes( $already ) . ' booked for that date.';
 	$msg .= $left > 0
-		? ' You can still book up to ' . mcw_rooms_fmt_minutes( $left ) . '.'
+		? ' You can still book up to ' . rar_fmt_minutes( $left ) . '.'
 		: ' Please choose another date, or cancel an existing reservation first.';
 	return $msg;
 }
 
-function mcw_rooms_reserve( WP_REST_Request $req ) {
+function rar_reserve( WP_REST_Request $req ) {
 	global $wpdb;
 
 	// 1. Anti-bot.
 	if ( ! wp_verify_nonce( $req->get_param( '_wpnonce' ), 'wp_rest' ) ) {
-		return new WP_Error( 'mcw_nonce', 'Your session expired. Please reload the page and try again.', array( 'status' => 403 ) );
+		return new WP_Error( 'rar_nonce', 'Your session expired. Please reload the page and try again.', array( 'status' => 403 ) );
 	}
-	if ( '' !== trim( (string) $req->get_param( 'mcw_hp' ) ) ) {
-		return new WP_Error( 'mcw_bot', 'Submission blocked.', array( 'status' => 400 ) );
+	if ( '' !== trim( (string) $req->get_param( 'rar_hp' ) ) ) {
+		return new WP_Error( 'rar_bot', 'Submission blocked.', array( 'status' => 400 ) );
 	}
 
 	// 2. Inputs.
@@ -419,52 +453,52 @@ function mcw_rooms_reserve( WP_REST_Request $req ) {
 	$email    = sanitize_email( (string) $req->get_param( 'email' ) );
 
 	if ( '' === $first || '' === $last ) {
-		return new WP_Error( 'mcw_name', 'Please enter your first and last name.', array( 'status' => 400 ) );
+		return new WP_Error( 'rar_name', 'Please enter your first and last name.', array( 'status' => 400 ) );
 	}
 	if ( ! is_email( $email ) ) {
-		return new WP_Error( 'mcw_email', 'Please enter a valid email address.', array( 'status' => 400 ) );
+		return new WP_Error( 'rar_email', 'Please enter a valid email address.', array( 'status' => 400 ) );
 	}
-	$domains = mcw_rooms_get()['rules']['emailDomains'];
-	if ( ! mcw_rooms_email_domain_allowed( $email, $domains ) ) {
-		return new WP_Error( 'mcw_email_domain', 'Reservations are limited to ' . mcw_rooms_domains_phrase( $domains ) . ' email addresses.', array( 'status' => 400 ) );
+	$domains = rar_get()['rules']['emailDomains'];
+	if ( ! rar_email_domain_allowed( $email, $domains ) ) {
+		return new WP_Error( 'rar_email_domain', 'Reservations are limited to ' . rar_domains_phrase( $domains ) . ' email addresses.', array( 'status' => 400 ) );
 	}
 	if ( ! preg_match( '/^\d{4}-\d{2}-\d{2}$/', $date ) || ! preg_match( '/^\d{2}:\d{2}$/', $start ) ) {
-		return new WP_Error( 'mcw_input', 'Invalid reservation details.', array( 'status' => 400 ) );
+		return new WP_Error( 'rar_input', 'Invalid reservation details.', array( 'status' => 400 ) );
 	}
 
 	// 3. Room + rules.
-	$cfg  = mcw_rooms_get();
+	$cfg  = rar_get();
 	$room = null;
 	foreach ( $cfg['rooms'] as $r ) { if ( $r['id'] === $room_id ) { $room = $r; break; } }
 	if ( ! $room ) {
-		return new WP_Error( 'mcw_room', 'That room is not available.', array( 'status' => 400 ) );
+		return new WP_Error( 'rar_room', 'That room is not available.', array( 'status' => 400 ) );
 	}
 	$maxMin = (int) $cfg['rules']['maxMin'];
 	if ( $duration < 30 || $duration > $maxMin || 0 !== $duration % 30 ) {
-		return new WP_Error( 'mcw_dur', 'Please choose a valid length.', array( 'status' => 400 ) );
+		return new WP_Error( 'rar_dur', 'Please choose a valid length.', array( 'status' => 400 ) );
 	}
 
 	// 4. Date within window.
-	$now   = mcw_rooms_now();
+	$now   = rar_now();
 	$today = $now->format( 'Y-m-d' );
 	$max   = ( clone $now )->modify( '+' . (int) $cfg['rules']['advanceDays'] . ' days' )->format( 'Y-m-d' );
 	if ( $date < $today || $date > $max ) {
-		return new WP_Error( 'mcw_window', 'That date is outside the booking window.', array( 'status' => 400 ) );
+		return new WP_Error( 'rar_window', 'That date is outside the booking window.', array( 'status' => 400 ) );
 	}
 
 	// 5. Every needed slot must be an in-hours candidate (guarantees within hours + no gap-spanning),
 	//    and not in the past.
-	$candidates = mcw_room_candidate_slots( $date );
-	$startMin   = mcw_room_hhmm2min( $start );
+	$candidates = rar_candidate_slots( $date );
+	$startMin   = rar_hhmm2min( $start );
 	$nowMin     = ( (int) $now->format( 'G' ) ) * 60 + (int) $now->format( 'i' );
 	$needed     = array();
 	for ( $m = $startMin; $m < $startMin + $duration; $m += 30 ) {
-		$hhmm = mcw_room_min2hhmm( $m );
+		$hhmm = rar_min2hhmm( $m );
 		if ( ! in_array( $hhmm, $candidates, true ) ) {
-			return new WP_Error( 'mcw_hours', 'That time is outside the room’s available hours.', array( 'status' => 400 ) );
+			return new WP_Error( 'rar_hours', 'That time is outside the room’s available hours.', array( 'status' => 400 ) );
 		}
 		if ( $date === $today && $m < $nowMin ) {
-			return new WP_Error( 'mcw_past', 'That time has already passed.', array( 'status' => 400 ) );
+			return new WP_Error( 'rar_past', 'That time has already passed.', array( 'status' => 400 ) );
 		}
 		$needed[] = $hhmm;
 	}
@@ -472,11 +506,11 @@ function mcw_rooms_reserve( WP_REST_Request $req ) {
 	// 5b. Daily limit per person (0 = no limit). Counted across all rooms for this email on this date.
 	$dailyMax = (int) $cfg['rules']['dailyMaxMin'];
 	if ( $dailyMax > 0 ) {
-		$already = mcw_rooms_booked_minutes_on( $email, $date );
+		$already = rar_booked_minutes_on( $email, $date );
 		if ( $already + $duration > $dailyMax ) {
 			return new WP_Error(
-				'mcw_daily',
-				mcw_rooms_daily_limit_message( $dailyMax, $already ),
+				'rar_daily',
+				rar_daily_limit_message( $dailyMax, $already ),
 				array( 'status' => 400 )
 			);
 		}
@@ -485,7 +519,7 @@ function mcw_rooms_reserve( WP_REST_Request $req ) {
 	// 6. Atomic multi-row insert. UNIQUE(room_id, slot_start) blocks any conflict, even concurrent ones.
 	$token   = wp_generate_password( 32, false );
 	$created = current_time( 'mysql' );
-	$table   = mcw_rooms_table();
+	$table   = rar_table();
 	$tuples  = array();
 	$args    = array();
 	foreach ( $needed as $hhmm ) {
@@ -503,34 +537,34 @@ function mcw_rooms_reserve( WP_REST_Request $req ) {
 
 	if ( false === $res ) {
 		if ( false !== stripos( (string) $wpdb->last_error, 'duplicate' ) ) {
-			return new WP_Error( 'mcw_taken', 'Sorry, that time was just booked. Please pick another slot.', array( 'status' => 409 ) );
+			return new WP_Error( 'rar_taken', 'Sorry, that time was just booked. Please pick another slot.', array( 'status' => 409 ) );
 		}
-		return new WP_Error( 'mcw_db', 'Something went wrong saving your reservation. Please try again.', array( 'status' => 500 ) );
+		return new WP_Error( 'rar_db', 'Something went wrong saving your reservation. Please try again.', array( 'status' => 500 ) );
 	}
 
 	// 6b. Re-check the daily limit now that the rows exist, so two simultaneous requests can't both
 	//     squeak past the pre-check. If this booking put the person over, undo it.
 	if ( $dailyMax > 0 ) {
-		$total = mcw_rooms_booked_minutes_on( $email, $date );
+		$total = rar_booked_minutes_on( $email, $date );
 		if ( $total > $dailyMax ) {
 			$wpdb->delete( $table, array( 'booking_id' => $token ), array( '%s' ) );
 			return new WP_Error(
-				'mcw_daily',
-				mcw_rooms_daily_limit_message( $dailyMax, $total - $duration ),
+				'rar_daily',
+				rar_daily_limit_message( $dailyMax, $total - $duration ),
 				array( 'status' => 400 )
 			);
 		}
 	}
 
 	// 7. Confirmation email (best-effort).
-	$endHHMM = mcw_room_min2hhmm( $startMin + $duration );
-	mcw_rooms_email_confirm( $email, $room['name'], $date, $start, $endHHMM, $token );
+	$endHHMM = rar_min2hhmm( $startMin + $duration );
+	rar_email_confirm( $email, $room['name'], $date, $start, $endHHMM, $token );
 
 	return rest_ensure_response( array( 'ok' => true, 'token' => $token ) );
 }
 
-function mcw_rooms_email_confirm( $to, $room_name, $date, $startHHMM, $endHHMM, $token ) {
-	$cancel  = add_query_arg( 'mcw_cancel', $token, home_url( '/' ) );
+function rar_email_confirm( $to, $room_name, $date, $startHHMM, $endHHMM, $token ) {
+	$cancel  = add_query_arg( 'rar_cancel', $token, home_url( '/' ) );
 	$subject = 'Room reservation confirmed — ' . $room_name . ' on ' . $date;
 	$lines   = array(
 		'Your study-room reservation is confirmed:',
@@ -542,9 +576,9 @@ function mcw_rooms_email_confirm( $to, $room_name, $date, $startHHMM, $endHHMM, 
 		'Need to cancel? Use this link:',
 		$cancel,
 	);
-	$headers = array( 'Reply-To: ' . MCW_ROOMS_REPLY_TO );
+	$headers = array( 'Reply-To: ' . RAR_REPLY_TO );
 	if ( ! wp_mail( $to, $subject, implode( "\n", $lines ), $headers ) ) {
-		error_log( 'mcw-reserve-a-room: confirmation email failed for ' . $to );
+		error_log( 'reserve-a-room: confirmation email failed for ' . $to );
 	}
 }
 
@@ -552,17 +586,19 @@ function mcw_rooms_email_confirm( $to, $room_name, $date, $startHHMM, $endHHMM, 
  *  Cancellation (tokenized link from the confirmation email)
  * ------------------------------------------------------------------ */
 
-function mcw_rooms_cancel_booking( $token ) {
+function rar_cancel_booking( $token ) {
 	global $wpdb;
 	$token = preg_replace( '/[^A-Za-z0-9]/', '', (string) $token );
 	if ( 32 !== strlen( $token ) ) { return 0; }
-	$table = mcw_rooms_table();
+	$table = rar_table();
 	return (int) $wpdb->query( $wpdb->prepare( "DELETE FROM {$table} WHERE booking_id = %s", $token ) );
 }
 
 add_action( 'template_redirect', function () {
-	if ( ! isset( $_GET['mcw_cancel'] ) ) { return; } // phpcs:ignore WordPress.Security.NonceVerification
-	$deleted = mcw_rooms_cancel_booking( wp_unslash( $_GET['mcw_cancel'] ) ); // phpcs:ignore WordPress.Security
+	// mcw_cancel: links in confirmation emails sent before 2.0.0 must keep working.
+	$param = isset( $_GET['rar_cancel'] ) ? 'rar_cancel' : ( isset( $_GET['mcw_cancel'] ) ? 'mcw_cancel' : '' ); // phpcs:ignore WordPress.Security.NonceVerification
+	if ( '' === $param ) { return; }
+	$deleted = rar_cancel_booking( wp_unslash( $_GET[ $param ] ) ); // phpcs:ignore WordPress.Security
 	$ok  = $deleted > 0;
 	$msg = $ok
 		? 'Your reservation has been cancelled. The room is now free for others to book.'
@@ -588,59 +624,59 @@ add_action( 'template_redirect', function () {
 add_action( 'admin_menu', function () {
 	add_menu_page(
 		'Reserve a Room', 'Reserve a Room', 'edit_pages',
-		'mcw-reserve-a-room', 'mcw_rooms_admin_page', 'dashicons-calendar-alt', 32
+		'reserve-a-room', 'rar_admin_page', 'dashicons-calendar-alt', 32
 	);
 	// After the editor so the editor stays the default submenu (Piece 2 menu-order lesson).
 	add_submenu_page(
-		'mcw-reserve-a-room', 'Reservations', 'Reservations', 'edit_pages',
-		'mcw-room-reservations', 'mcw_rooms_reservations_page'
+		'reserve-a-room', 'Reservations', 'Reservations', 'edit_pages',
+		'reserve-a-room-reservations', 'rar_reservations_page'
 	);
 } );
 
-function mcw_rooms_admin_page() {
-	$root  = esc_url_raw( rest_url( 'mcw-rooms/v1/config' ) );
+function rar_admin_page() {
+	$root  = esc_url_raw( rest_url( 'reserve-a-room/v1/config' ) );
 	$nonce = wp_create_nonce( 'wp_rest' );
 	echo '<div class="wrap"><h1>Reserve a Room</h1>';
 	echo '<p style="max-width:680px;color:#555">Add each bookable room and set the rules, then click <strong>Save &amp; publish</strong>. Bookable hours come automatically from <strong>Library Hours</strong> — rooms can only be booked when the library is open. Show the booking grid on any page with <code>[reserve_a_room]</code>.</p>';
-	echo '<script>window.MCW_ROOMS=' . wp_json_encode( array( 'root' => $root, 'nonce' => $nonce ) ) . ';</script>';
-	echo mcw_rooms_editor_markup(); // phpcs:ignore WordPress.Security.EscapeOutput
+	echo '<script>window.RAR_ADMIN=' . wp_json_encode( array( 'root' => $root, 'nonce' => $nonce ) ) . ';</script>';
+	echo rar_editor_markup(); // phpcs:ignore WordPress.Security.EscapeOutput
 	echo '</div>';
 }
 
 /** The editor UI + JS. Nowdoc => no PHP interpolation of $ in JS. */
-function mcw_rooms_editor_markup() {
+function rar_editor_markup() {
 	return <<<'HTML'
 <style>
-  #mcwrm{--accent:#00539b;--line:#dcdcdc;--muted:#666;max-width:820px;font-size:14px}
-  #mcwrm .card{background:#fff;border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:14px 0;position:relative}
-  #mcwrm .grid{display:grid;grid-template-columns:2fr 1fr;gap:10px 14px}
-  #mcwrm .full{grid-column:1/3}
-  #mcwrm label{display:block;font-weight:600;font-size:.82rem;color:var(--muted);margin-bottom:3px}
-  #mcwrm input[type=text],#mcwrm input[type=number]{width:100%;font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:6px;box-sizing:border-box}
-  #mcwrm .num{font-weight:700;color:var(--accent);margin-bottom:6px}
-  #mcwrm .b{cursor:pointer;border:1px solid var(--accent);background:var(--accent);color:#fff;padding:8px 14px;border-radius:7px;font-weight:600;font-size:.9rem}
-  #mcwrm .b.sec{background:#fff;color:var(--accent)}
-  #mcwrm .b.ghost{background:#fff;color:var(--muted);border-color:var(--line)}
-  #mcwrm .b.tiny{padding:3px 9px;font-size:.8rem;border-radius:5px;position:absolute;top:12px;right:14px}
-  #mcwrm .rules{display:flex;gap:16px;flex-wrap:wrap;align-items:end}
-  #mcwrm .rules label{font-weight:600;color:#1a1a1a}
-  #mcwrm .rules input{width:90px}
-  #mcwrm select{font:inherit;padding:5px 8px;border:1px solid var(--line);border-radius:6px}
-  #mcwrm .domains{margin-top:14px}
-  #mcwrm .domains label{color:#1a1a1a}
-  #mcwrm textarea{width:100%;max-width:420px;font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:6px;box-sizing:border-box}
-  #mcwrm .bar{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:8px}
-  #mcwrm .status{font-weight:600}
-  #mcwrm .hint{font-size:.82rem;color:var(--muted);margin:6px 0 0}
+  #rar-admin{--accent:#00539b;--line:#dcdcdc;--muted:#666;max-width:820px;font-size:14px}
+  #rar-admin .card{background:#fff;border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:14px 0;position:relative}
+  #rar-admin .grid{display:grid;grid-template-columns:2fr 1fr;gap:10px 14px}
+  #rar-admin .full{grid-column:1/3}
+  #rar-admin label{display:block;font-weight:600;font-size:.82rem;color:var(--muted);margin-bottom:3px}
+  #rar-admin input[type=text],#rar-admin input[type=number]{width:100%;font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:6px;box-sizing:border-box}
+  #rar-admin .num{font-weight:700;color:var(--accent);margin-bottom:6px}
+  #rar-admin .b{cursor:pointer;border:1px solid var(--accent);background:var(--accent);color:#fff;padding:8px 14px;border-radius:7px;font-weight:600;font-size:.9rem}
+  #rar-admin .b.sec{background:#fff;color:var(--accent)}
+  #rar-admin .b.ghost{background:#fff;color:var(--muted);border-color:var(--line)}
+  #rar-admin .b.tiny{padding:3px 9px;font-size:.8rem;border-radius:5px;position:absolute;top:12px;right:14px}
+  #rar-admin .rules{display:flex;gap:16px;flex-wrap:wrap;align-items:end}
+  #rar-admin .rules label{font-weight:600;color:#1a1a1a}
+  #rar-admin .rules input{width:90px}
+  #rar-admin select{font:inherit;padding:5px 8px;border:1px solid var(--line);border-radius:6px}
+  #rar-admin .domains{margin-top:14px}
+  #rar-admin .domains label{color:#1a1a1a}
+  #rar-admin textarea{width:100%;max-width:420px;font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:6px;box-sizing:border-box}
+  #rar-admin .bar{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:8px}
+  #rar-admin .status{font-weight:600}
+  #rar-admin .hint{font-size:.82rem;color:var(--muted);margin:6px 0 0}
 </style>
-<div id="mcwrm">
+<div id="rar-admin">
   <div class="card">
     <h2>Rules</h2>
     <div class="rules">
-      <label>Max length (minutes)<br><input type="number" id="mcwrm-max" min="30" step="30"></label>
-      <label>Book ahead (days)<br><input type="number" id="mcwrm-adv" min="1" max="90"></label>
-      <label>Daily limit per person (minutes)<br><input type="number" id="mcwrm-daily" min="0" max="480" step="30"></label>
-      <label>Default time format<br><select id="mcwrm-fmt"><option value="24">24-hour (14:30)</option><option value="12">12-hour (2:30 PM)</option></select></label>
+      <label>Max length (minutes)<br><input type="number" id="rar-admin-max" min="30" step="30"></label>
+      <label>Book ahead (days)<br><input type="number" id="rar-admin-adv" min="1" max="90"></label>
+      <label>Daily limit per person (minutes)<br><input type="number" id="rar-admin-daily" min="0" max="480" step="30"></label>
+      <label>Default time format<br><select id="rar-admin-fmt"><option value="24">24-hour (14:30)</option><option value="12">12-hour (2:30 PM)</option></select></label>
     </div>
     <p class="hint">Slots are 30 minutes. Max length must be a multiple of 30.</p>
     <p class="hint"><strong>Daily limit</strong> is the total a single person (by email) can book across
@@ -649,15 +685,15 @@ function mcw_rooms_editor_markup() {
     <p class="hint"><strong>Default time format</strong> is how times first appear in the booking grid.
       Patrons can still switch between 12h and 24h.</p>
     <div class="domains">
-      <label for="mcwrm-domains">Allowed email domains</label>
-      <textarea id="mcwrm-domains" rows="3" placeholder="wheatoncollege.edu" aria-describedby="mcwrm-domains-hint"></textarea>
-      <p class="hint" id="mcwrm-domains-hint">One per line (or separated by commas). Only email addresses at these domains — or their
+      <label for="rar-admin-domains">Allowed email domains</label>
+      <textarea id="rar-admin-domains" rows="3" placeholder="wheatoncollege.edu" aria-describedby="rar-admin-domains-hint"></textarea>
+      <p class="hint" id="rar-admin-domains-hint">One per line (or separated by commas). Only email addresses at these domains — or their
         subdomains — can book. Leave empty to let anyone book.</p>
     </div>
   </div>
-  <div id="mcwrm-rooms"></div>
-  <div class="bar"><button type="button" class="b sec" id="mcwrm-add">+ Add a room</button></div>
-  <div class="bar"><button type="button" class="b" id="mcwrm-save">Save &amp; publish</button><span class="status" id="mcwrm-status"></span></div>
+  <div id="rar-admin-rooms"></div>
+  <div class="bar"><button type="button" class="b sec" id="rar-admin-add">+ Add a room</button></div>
+  <div class="bar"><button type="button" class="b" id="rar-admin-save">Save &amp; publish</button><span class="status" id="rar-admin-status"></span></div>
 </div>
 <script>
 (function(){
@@ -665,7 +701,7 @@ function mcw_rooms_editor_markup() {
 var data={rules:{slotMin:30,maxMin:120,advanceDays:14,dailyMaxMin:0,timeFormat:"24",emailDomains:[]},rooms:[]};
 function el(t,c){var e=document.createElement(t);if(c)e.className=c;return e;}
 function renderRooms(){
-  var wrap=document.getElementById("mcwrm-rooms");wrap.innerHTML="";
+  var wrap=document.getElementById("rar-admin-rooms");wrap.innerHTML="";
   if(data.rooms.length===0){var p=el("p","hint");p.textContent="No rooms yet — click “Add a room.”";wrap.appendChild(p);}
   data.rooms.forEach(function(room,i){
     var card=el("div","card");
@@ -685,28 +721,28 @@ function field(label,obj,key,type,cls){
   cell.appendChild(lab);cell.appendChild(inp);return cell;
 }
 function fillRules(){
-  document.getElementById("mcwrm-max").value=data.rules.maxMin;
-  document.getElementById("mcwrm-adv").value=data.rules.advanceDays;
-  document.getElementById("mcwrm-daily").value=data.rules.dailyMaxMin||0;
-  document.getElementById("mcwrm-fmt").value=data.rules.timeFormat==="12"?"12":"24";
-  document.getElementById("mcwrm-domains").value=(data.rules.emailDomains||[]).join("\n");
+  document.getElementById("rar-admin-max").value=data.rules.maxMin;
+  document.getElementById("rar-admin-adv").value=data.rules.advanceDays;
+  document.getElementById("rar-admin-daily").value=data.rules.dailyMaxMin||0;
+  document.getElementById("rar-admin-fmt").value=data.rules.timeFormat==="12"?"12":"24";
+  document.getElementById("rar-admin-domains").value=(data.rules.emailDomains||[]).join("\n");
 }
-function flash(m,bad){var s=document.getElementById("mcwrm-status");s.textContent=m;s.style.color=bad?"#b42318":"#1a7f37";}
-document.getElementById("mcwrm-add").onclick=function(){data.rooms.push({id:"",name:"",capacity:4,notes:""});renderRooms();};
-document.getElementById("mcwrm-save").onclick=function(){
-  data.rules.maxMin=parseInt(document.getElementById("mcwrm-max").value||"120",10);
-  data.rules.advanceDays=parseInt(document.getElementById("mcwrm-adv").value||"14",10);
-  data.rules.dailyMaxMin=parseInt(document.getElementById("mcwrm-daily").value||"0",10);
+function flash(m,bad){var s=document.getElementById("rar-admin-status");s.textContent=m;s.style.color=bad?"#b42318":"#1a7f37";}
+document.getElementById("rar-admin-add").onclick=function(){data.rooms.push({id:"",name:"",capacity:4,notes:""});renderRooms();};
+document.getElementById("rar-admin-save").onclick=function(){
+  data.rules.maxMin=parseInt(document.getElementById("rar-admin-max").value||"120",10);
+  data.rules.advanceDays=parseInt(document.getElementById("rar-admin-adv").value||"14",10);
+  data.rules.dailyMaxMin=parseInt(document.getElementById("rar-admin-daily").value||"0",10);
   if(!(data.rules.dailyMaxMin>0))data.rules.dailyMaxMin=0;
-  data.rules.timeFormat=document.getElementById("mcwrm-fmt").value;
-  data.rules.emailDomains=document.getElementById("mcwrm-domains").value.split(/[\s,;]+/).filter(Boolean);
+  data.rules.timeFormat=document.getElementById("rar-admin-fmt").value;
+  data.rules.emailDomains=document.getElementById("rar-admin-domains").value.split(/[\s,;]+/).filter(Boolean);
   flash("Saving…");
-  fetch(MCW_ROOMS.root,{method:"POST",headers:{"Content-Type":"application/json","X-WP-Nonce":MCW_ROOMS.nonce},body:JSON.stringify(data)})
+  fetch(RAR_ADMIN.root,{method:"POST",headers:{"Content-Type":"application/json","X-WP-Nonce":RAR_ADMIN.nonce},body:JSON.stringify(data)})
     .then(function(r){if(!r.ok)throw 0;return r.json();})
     .then(function(d){if(d&&d.rules){data.rules=d.rules;fillRules();}flash("Saved — it's live. ✓");})
     .catch(function(){flash("Save failed — please try again or reload.",true);});
 };
-fetch(MCW_ROOMS.root).then(function(r){return r.json();}).then(function(d){
+fetch(RAR_ADMIN.root).then(function(r){return r.json();}).then(function(d){
   data.rooms=(d.rooms||[]).map(function(x){return{id:x.id,name:x.name,capacity:x.capacity,notes:x.notes};});
   data.rules=d.rules||data.rules;
   fillRules();
@@ -717,16 +753,16 @@ fetch(MCW_ROOMS.root).then(function(r){return r.json();}).then(function(d){
 HTML;
 }
 
-function mcw_rooms_reservations_page() {
+function rar_reservations_page() {
 	global $wpdb;
 	// Handle a staff cancel (nonce-protected form POST).
-	if ( isset( $_POST['mcw_cancel_token'], $_POST['_wpnonce'] )
-		&& wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['_wpnonce'] ) ), 'mcw_rooms_cancel' )
+	if ( isset( $_POST['rar_cancel_token'], $_POST['_wpnonce'] )
+		&& wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['_wpnonce'] ) ), 'rar_cancel' )
 		&& current_user_can( 'edit_pages' ) ) {
-		$n = mcw_rooms_cancel_booking( sanitize_text_field( wp_unslash( $_POST['mcw_cancel_token'] ) ) );
+		$n = rar_cancel_booking( sanitize_text_field( wp_unslash( $_POST['rar_cancel_token'] ) ) );
 		echo '<div class="notice notice-success"><p>' . ( $n > 0 ? 'Reservation cancelled.' : 'Nothing to cancel.' ) . '</p></div>';
 	}
-	$table = mcw_rooms_table();
+	$table = rar_table();
 	$now   = current_time( 'mysql' );
 	// One row per booking: min/max slot = start/end, +30 min on the last slot for the true end.
 	$rows = $wpdb->get_results( $wpdb->prepare(
@@ -736,7 +772,7 @@ function mcw_rooms_reservations_page() {
 		 GROUP BY booking_id, room_id, first, last, email
 		 ORDER BY start_at ASC", $now
 	) );
-	$cfg   = mcw_rooms_get();
+	$cfg   = rar_get();
 	$names = array();
 	foreach ( $cfg['rooms'] as $r ) { $names[ $r['id'] ] = $r['name']; }
 
@@ -754,8 +790,8 @@ function mcw_rooms_reservations_page() {
 		echo '<tr><td>' . esc_html( $room ) . '</td><td>' . esc_html( $date ) . '</td><td>' . esc_html( $start . ' – ' . $end )
 			. '</td><td>' . esc_html( $r->first . ' ' . $r->last ) . '</td><td>' . esc_html( $r->email ) . '</td><td>'
 			. '<form method="post" onsubmit="return confirm(\'Cancel this reservation?\')" style="margin:0">'
-			. wp_nonce_field( 'mcw_rooms_cancel', '_wpnonce', true, false )
-			. '<input type="hidden" name="mcw_cancel_token" value="' . esc_attr( $r->booking_id ) . '">'
+			. wp_nonce_field( 'rar_cancel', '_wpnonce', true, false )
+			. '<input type="hidden" name="rar_cancel_token" value="' . esc_attr( $r->booking_id ) . '">'
 			. '<button class="button button-small">Cancel</button></form></td></tr>';
 	}
 	echo '</tbody></table></div>';
@@ -765,91 +801,91 @@ function mcw_rooms_reservations_page() {
  *  Front-end  [reserve_a_room]
  * ------------------------------------------------------------------ */
 
-add_shortcode( 'reserve_a_room', 'mcw_rooms_shortcode' );
+add_shortcode( 'reserve_a_room', 'rar_shortcode' );
 
-function mcw_rooms_shortcode( $atts ) {
+function rar_shortcode( $atts ) {
 	$cfg = array(
-		'availUrl'   => esc_url_raw( rest_url( 'mcw-rooms/v1/availability' ) ),
-		'configUrl'  => esc_url_raw( rest_url( 'mcw-rooms/v1/config' ) ),
-		'reserveUrl' => esc_url_raw( rest_url( 'mcw-rooms/v1/reserve' ) ),
+		'availUrl'   => esc_url_raw( rest_url( 'reserve-a-room/v1/availability' ) ),
+		'configUrl'  => esc_url_raw( rest_url( 'reserve-a-room/v1/config' ) ),
+		'reserveUrl' => esc_url_raw( rest_url( 'reserve-a-room/v1/reserve' ) ),
 		'nonce'      => wp_create_nonce( 'wp_rest' ),
 	);
-	$rules          = mcw_rooms_get()['rules'];
+	$rules          = rar_get()['rules'];
 	$cfg['fmt12']   = ( '12' === $rules['timeFormat'] );
 	$cfg['domains'] = array_values( $rules['emailDomains'] );
-	$config_js = '<script>window.MCW_ROOMS_CFG=' . wp_json_encode( $cfg ) . ';</script>';
-	return mcw_rooms_widget_markup() . $config_js . mcw_rooms_widget_script();
+	$config_js = '<script>window.RAR_CFG=' . wp_json_encode( $cfg ) . ';</script>';
+	return rar_widget_markup() . $config_js . rar_widget_script();
 }
 
-function mcw_rooms_widget_markup() {
+function rar_widget_markup() {
 	return <<<'HTML'
-<div id="mcw-rooms" class="mcw-rooms" aria-live="polite">
-  <div class="mcw-rooms__bar">
-    <label>Date <input type="date" id="mcw-rooms-date"></label>
-    <span class="mcw-rooms__fmt" role="group" aria-label="Time format">
-      <button type="button" id="mcw-rooms-fmt24" class="fmtbtn on" aria-pressed="true">24h</button>
-      <button type="button" id="mcw-rooms-fmt12" class="fmtbtn" aria-pressed="false">12h</button>
+<div id="rar-rooms" class="rar-rooms" aria-live="polite">
+  <div class="rar-rooms__bar">
+    <label>Date <input type="date" id="rar-rooms-date"></label>
+    <span class="rar-rooms__fmt" role="group" aria-label="Time format">
+      <button type="button" id="rar-rooms-fmt24" class="fmtbtn on" aria-pressed="true">24h</button>
+      <button type="button" id="rar-rooms-fmt12" class="fmtbtn" aria-pressed="false">12h</button>
     </span>
   </div>
-  <div id="mcw-rooms-grid"><p class="mcw-rooms__note">Loading…</p></div>
-  <div id="mcw-rooms-form"></div>
+  <div id="rar-rooms-grid"><p class="rar-rooms__note">Loading…</p></div>
+  <div id="rar-rooms-form"></div>
 </div>
 <style>
-  #mcw-rooms{--accent:#00539b;--line:#dcdcdc;--grid:#8b9198;--muted:#666;--free:#bfe6cb;--freeb:#1a7f37;--taken:#c9cccf;
+  #rar-rooms{--accent:#00539b;--line:#dcdcdc;--grid:#8b9198;--muted:#666;--free:#bfe6cb;--freeb:#1a7f37;--taken:#c9cccf;
     font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:#1a1a1a;max-width:100%}
-  #mcw-rooms .mcw-rooms__bar{margin:0 0 12px;font-weight:600;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
-  #mcw-rooms input[type=date]{font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:6px}
-  #mcw-rooms .mcw-rooms__fmt{display:inline-flex;border:1px solid var(--line);border-radius:6px;overflow:hidden}
-  #mcw-rooms .fmtbtn{font:inherit;font-weight:600;background:#fff;color:#1a1a1a;border:0;padding:6px 10px;cursor:pointer}
-  #mcw-rooms .fmtbtn + .fmtbtn{border-left:1px solid var(--line)}
-  #mcw-rooms .fmtbtn.on{background:var(--accent);color:#fff}
-  #mcw-rooms .mcw-rooms__scroll{overflow-x:auto}
-  #mcw-rooms table{border-collapse:collapse;font-size:.8rem}
-  #mcw-rooms th,#mcw-rooms td{border:1px solid var(--grid);padding:0}
-  #mcw-rooms table{border:1px solid var(--grid)}
-  #mcw-rooms th{background:#f6f8fa;padding:4px 6px;white-space:nowrap;font-weight:600;min-width:52px}
-  #mcw-rooms th.mcw-rooms__room{text-align:left;position:sticky;left:0;z-index:2;background:#f6f8fa;min-width:150px}
-  #mcw-rooms th.mcw-rooms__rowhead{text-align:left;position:sticky;left:0;z-index:1;background:#fff;font-weight:600;padding:4px 6px;white-space:nowrap;min-width:150px}
-  #mcw-rooms .mcw-rooms__rhwrap{display:flex;align-items:center;gap:8px}
-  #mcw-rooms .mcw-rooms__info{margin-left:auto;flex:0 0 auto;width:16px;height:16px;line-height:16px;padding:0;border:0;text-align:center;border-radius:50%;background:var(--accent);color:#fff;font-family:inherit;font-size:11px;font-weight:700;font-style:normal;cursor:pointer}
-  #mcw-rooms .mcw-rooms__info:focus-visible{outline:2px solid #003b71;outline-offset:2px}
-  #mcw-rooms .mcw-rooms__notetext{display:block;max-width:220px;margin-top:4px;white-space:normal;font-weight:400;color:#1a1a1a}
-  #mcw-rooms .mcw-rooms__notetext[hidden]{display:none}
-  #mcw-rooms .mcw-sr{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
-  #mcw-rooms .slot{width:100%;min-width:52px;height:34px;display:block}
-  #mcw-rooms .slot.free{background:var(--free);cursor:pointer}
-  #mcw-rooms .slot.free:hover{background:var(--freeb)}
-  #mcw-rooms .slot.free:focus{outline:3px solid #003b71;outline-offset:-3px;background:var(--freeb)}
-  #mcw-rooms .slot.taken{background:var(--taken);background-image:repeating-linear-gradient(45deg,transparent,transparent 4px,rgba(0,0,0,.06) 4px,rgba(0,0,0,.06) 8px)}
-  #mcw-rooms .mcw-rooms__note{color:var(--muted);padding:8px 0}
-  #mcw-rooms .mcw-rooms__legend{font-size:.8rem;color:var(--muted);margin-top:8px}
-  #mcw-rooms .mcw-rooms__kbd{margin:0 0 10px}
-  #mcw-rooms .mcw-rooms__legend b{display:inline-block;width:12px;height:12px;vertical-align:-2px;border:1px solid var(--line)}
-  #mcw-rooms .mcw-rooms__legend b.is-free{background:var(--free)}
-  #mcw-rooms .mcw-rooms__legend b.is-taken{background:var(--taken)}
-  #mcw-rooms-form{max-width:420px;margin-top:16px}
-  #mcw-rooms-form .fld{margin:10px 0}
-  #mcw-rooms-form label{display:block;font-weight:600;margin-bottom:3px}
-  #mcw-rooms-form input,#mcw-rooms-form select{width:100%;font:inherit;padding:8px 10px;border:1px solid var(--line);border-radius:6px;box-sizing:border-box}
-  #mcw-rooms-form .err{color:#b42318;font-size:.85rem;margin-top:3px}
-  #mcw-rooms-form .hint{color:var(--muted);font-size:.85rem;margin-top:3px}
-  #mcw-rooms-form .go{background:var(--accent);color:#fff;border:0;padding:10px 18px;border-radius:7px;font-weight:600;cursor:pointer}
-  #mcw-rooms-form .cancel{background:none;border:0;color:var(--muted);text-decoration:underline;cursor:pointer;margin-left:10px}
-  #mcw-rooms-form .note{background:#eef4fb;border:1px solid #cfe0f2;border-radius:8px;padding:12px 14px;margin-bottom:14px}
+  #rar-rooms .rar-rooms__bar{margin:0 0 12px;font-weight:600;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+  #rar-rooms input[type=date]{font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:6px}
+  #rar-rooms .rar-rooms__fmt{display:inline-flex;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+  #rar-rooms .fmtbtn{font:inherit;font-weight:600;background:#fff;color:#1a1a1a;border:0;padding:6px 10px;cursor:pointer}
+  #rar-rooms .fmtbtn + .fmtbtn{border-left:1px solid var(--line)}
+  #rar-rooms .fmtbtn.on{background:var(--accent);color:#fff}
+  #rar-rooms .rar-rooms__scroll{overflow-x:auto}
+  #rar-rooms table{border-collapse:collapse;font-size:.8rem}
+  #rar-rooms th,#rar-rooms td{border:1px solid var(--grid);padding:0}
+  #rar-rooms table{border:1px solid var(--grid)}
+  #rar-rooms th{background:#f6f8fa;padding:4px 6px;white-space:nowrap;font-weight:600;min-width:52px}
+  #rar-rooms th.rar-rooms__room{text-align:left;position:sticky;left:0;z-index:2;background:#f6f8fa;min-width:150px}
+  #rar-rooms th.rar-rooms__rowhead{text-align:left;position:sticky;left:0;z-index:1;background:#fff;font-weight:600;padding:4px 6px;white-space:nowrap;min-width:150px}
+  #rar-rooms .rar-rooms__rhwrap{display:flex;align-items:center;gap:8px}
+  #rar-rooms .rar-rooms__info{margin-left:auto;flex:0 0 auto;width:16px;height:16px;line-height:16px;padding:0;border:0;text-align:center;border-radius:50%;background:var(--accent);color:#fff;font-family:inherit;font-size:11px;font-weight:700;font-style:normal;cursor:pointer}
+  #rar-rooms .rar-rooms__info:focus-visible{outline:2px solid #003b71;outline-offset:2px}
+  #rar-rooms .rar-rooms__notetext{display:block;max-width:220px;margin-top:4px;white-space:normal;font-weight:400;color:#1a1a1a}
+  #rar-rooms .rar-rooms__notetext[hidden]{display:none}
+  #rar-rooms .rar-sr{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+  #rar-rooms .slot{width:100%;min-width:52px;height:34px;display:block}
+  #rar-rooms .slot.free{background:var(--free);cursor:pointer}
+  #rar-rooms .slot.free:hover{background:var(--freeb)}
+  #rar-rooms .slot.free:focus{outline:3px solid #003b71;outline-offset:-3px;background:var(--freeb)}
+  #rar-rooms .slot.taken{background:var(--taken);background-image:repeating-linear-gradient(45deg,transparent,transparent 4px,rgba(0,0,0,.06) 4px,rgba(0,0,0,.06) 8px)}
+  #rar-rooms .rar-rooms__note{color:var(--muted);padding:8px 0}
+  #rar-rooms .rar-rooms__legend{font-size:.8rem;color:var(--muted);margin-top:8px}
+  #rar-rooms .rar-rooms__kbd{margin:0 0 10px}
+  #rar-rooms .rar-rooms__legend b{display:inline-block;width:12px;height:12px;vertical-align:-2px;border:1px solid var(--line)}
+  #rar-rooms .rar-rooms__legend b.is-free{background:var(--free)}
+  #rar-rooms .rar-rooms__legend b.is-taken{background:var(--taken)}
+  #rar-rooms-form{max-width:420px;margin-top:16px}
+  #rar-rooms-form .fld{margin:10px 0}
+  #rar-rooms-form label{display:block;font-weight:600;margin-bottom:3px}
+  #rar-rooms-form input,#rar-rooms-form select{width:100%;font:inherit;padding:8px 10px;border:1px solid var(--line);border-radius:6px;box-sizing:border-box}
+  #rar-rooms-form .err{color:#b42318;font-size:.85rem;margin-top:3px}
+  #rar-rooms-form .hint{color:var(--muted);font-size:.85rem;margin-top:3px}
+  #rar-rooms-form .go{background:var(--accent);color:#fff;border:0;padding:10px 18px;border-radius:7px;font-weight:600;cursor:pointer}
+  #rar-rooms-form .cancel{background:none;border:0;color:var(--muted);text-decoration:underline;cursor:pointer;margin-left:10px}
+  #rar-rooms-form .note{background:#eef4fb;border:1px solid #cfe0f2;border-radius:8px;padding:12px 14px;margin-bottom:14px}
 </style>
 HTML;
 }
 
-function mcw_rooms_widget_script() {
+function rar_widget_script() {
 	return <<<'HTML'
 <script>
 (function(){
 "use strict";
-var CFG=window.MCW_ROOMS_CFG, root=document.getElementById("mcw-rooms");
+var CFG=window.RAR_CFG, root=document.getElementById("rar-rooms");
 if(!root||!CFG)return;
-var gridEl=document.getElementById("mcw-rooms-grid"), formEl=document.getElementById("mcw-rooms-form");
-var dateEl=document.getElementById("mcw-rooms-date");
-var fmt24Btn=document.getElementById("mcw-rooms-fmt24"), fmt12Btn=document.getElementById("mcw-rooms-fmt12");
+var gridEl=document.getElementById("rar-rooms-grid"), formEl=document.getElementById("rar-rooms-form");
+var dateEl=document.getElementById("rar-rooms-date");
+var fmt24Btn=document.getElementById("rar-rooms-fmt24"), fmt12Btn=document.getElementById("rar-rooms-fmt12");
 var AVAIL=null, fmt12=false; // display-only; all data/requests/emails stay 24h "HH:MM"
 var notesShown={}; // room id -> true while its note is open, so a redraw keeps it open
 function esc(x){return String(x==null?"":x).replace(/[&<>"']/g,function(c){return{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];});}
@@ -889,33 +925,33 @@ fetch(CFG.configUrl).then(function(r){return r.json();}).then(function(c){
   var t=todayStr();dateEl.min=t;dateEl.value=t;
   var max=new Date();max.setDate(max.getDate()+adv);dateEl.max=max.getFullYear()+"-"+pad(max.getMonth()+1)+"-"+pad(max.getDate());
   load(t);
-}).catch(function(){gridEl.innerHTML='<p class="mcw-rooms__note">Room booking is temporarily unavailable.</p>';});
+}).catch(function(){gridEl.innerHTML='<p class="rar-rooms__note">Room booking is temporarily unavailable.</p>';});
 dateEl.addEventListener("change",function(){formEl.innerHTML="";load(dateEl.value);});
 function load(date){
-  formEl.innerHTML="";gridEl.innerHTML='<p class="mcw-rooms__note">Loading…</p>';
+  formEl.innerHTML="";gridEl.innerHTML='<p class="rar-rooms__note">Loading…</p>';
   var url=CFG.availUrl+(CFG.availUrl.indexOf("?")>-1?"&":"?")+"date="+encodeURIComponent(date)+"&v="+Date.now();
   fetch(url,{cache:"no-cache"}).then(function(r){if(!r.ok)return r.json().then(function(j){throw new Error(j.message||"Unavailable");});return r.json();})
-    .then(function(a){AVAIL=a;renderGrid();}).catch(function(e){gridEl.innerHTML='<p class="mcw-rooms__note">'+esc(e.message)+'</p>';});
+    .then(function(a){AVAIL=a;renderGrid();}).catch(function(e){gridEl.innerHTML='<p class="rar-rooms__note">'+esc(e.message)+'</p>';});
 }
 function renderGrid(){
   var a=AVAIL;
-  if(!a.slots||a.slots.length===0){gridEl.innerHTML='<p class="mcw-rooms__note">The library is closed on this date — no rooms are bookable.</p>';return;}
-  if(!a.rooms||a.rooms.length===0){gridEl.innerHTML='<p class="mcw-rooms__note">No rooms are set up yet.</p>';return;}
+  if(!a.slots||a.slots.length===0){gridEl.innerHTML='<p class="rar-rooms__note">The library is closed on this date — no rooms are bookable.</p>';return;}
+  if(!a.rooms||a.rooms.length===0){gridEl.innerHTML='<p class="rar-rooms__note">No rooms are set up yet.</p>';return;}
   var cols=a.slots, COLS=cols.length, ROWS=a.rooms.length;
-  var html='<p class="mcw-rooms__legend mcw-rooms__kbd">Keyboard: press Tab to reach the grid, use the arrow keys to move between available times, then press Enter to book.</p>'
-    +'<div class="mcw-rooms__scroll"><table>'
-    +'<caption class="mcw-sr">Room availability for '+esc(a.date)+'. Use the arrow keys to move between available times and press Enter to book.</caption>'
-    +'<thead><tr><th scope="col" class="mcw-rooms__room">Room</th>';
+  var html='<p class="rar-rooms__legend rar-rooms__kbd">Keyboard: press Tab to reach the grid, use the arrow keys to move between available times, then press Enter to book.</p>'
+    +'<div class="rar-rooms__scroll"><table>'
+    +'<caption class="rar-sr">Room availability for '+esc(a.date)+'. Use the arrow keys to move between available times and press Enter to book.</caption>'
+    +'<thead><tr><th scope="col" class="rar-rooms__room">Room</th>';
   cols.forEach(function(s){html+='<th scope="col">'+esc(dispTime(s))+'</th>';});
   html+='</tr></thead><tbody>';
   a.rooms.forEach(function(room,ri){
     var taken=(a.taken&&a.taken[room.id])||[];
     // The "i" is a disclosure button: click, tap, Enter or Space shows the
     // note under the room name; Esc hides it again.
-    var noteId="mcw-rooms-note-"+ri, shown=!!notesShown[room.id];
-    var info=room.notes?'<button type="button" class="mcw-rooms__info" data-room="'+esc(room.id)+'" aria-expanded="'+shown+'" aria-controls="'+noteId+'" aria-label="Details for '+esc(room.name)+'">i</button>':'';
-    var note=room.notes?'<span class="mcw-rooms__notetext" id="'+noteId+'"'+(shown?'':' hidden')+'>'+esc(room.notes)+'</span>':'';
-    html+='<tr><th scope="row" class="mcw-rooms__rowhead"><span class="mcw-rooms__rhwrap"><span>'+esc(room.name)+'</span>'+info+'</span>'+note+'</th>';
+    var noteId="rar-rooms-note-"+ri, shown=!!notesShown[room.id];
+    var info=room.notes?'<button type="button" class="rar-rooms__info" data-room="'+esc(room.id)+'" aria-expanded="'+shown+'" aria-controls="'+noteId+'" aria-label="Details for '+esc(room.name)+'">i</button>':'';
+    var note=room.notes?'<span class="rar-rooms__notetext" id="'+noteId+'"'+(shown?'':' hidden')+'>'+esc(room.notes)+'</span>':'';
+    html+='<tr><th scope="row" class="rar-rooms__rowhead"><span class="rar-rooms__rhwrap"><span>'+esc(room.name)+'</span>'+info+'</span>'+note+'</th>';
     cols.forEach(function(s,ci){
       var isTaken=taken.indexOf(s)>-1;
       var past=(a.nowMin!=null)&&(hhmm2m(s)<a.nowMin);
@@ -925,10 +961,10 @@ function renderGrid(){
     html+='</tr>';
   });
   html+='</tbody></table></div>'
-    +'<p class="mcw-rooms__legend"><b class="is-free" aria-hidden="true"></b> <strong>Green = available</strong> — click or press Enter on a green square to book &nbsp;&nbsp; <b class="is-taken" aria-hidden="true"></b> grey = unavailable</p>'
-    +(a.dailyMaxMin>0?'<p class="mcw-rooms__legend">Each person may book up to '+esc(fmtMins(a.dailyMaxMin))+' per day across all rooms.</p>':'');
+    +'<p class="rar-rooms__legend"><b class="is-free" aria-hidden="true"></b> <strong>Green = available</strong> — click or press Enter on a green square to book &nbsp;&nbsp; <b class="is-taken" aria-hidden="true"></b> grey = unavailable</p>'
+    +(a.dailyMaxMin>0?'<p class="rar-rooms__legend">Each person may book up to '+esc(fmtMins(a.dailyMaxMin))+' per day across all rooms.</p>':'');
   gridEl.innerHTML=html;
-  [].forEach.call(gridEl.querySelectorAll(".mcw-rooms__info"),function(btn){
+  [].forEach.call(gridEl.querySelectorAll(".rar-rooms__info"),function(btn){
     var note=document.getElementById(btn.getAttribute("aria-controls"));
     function show(on){
       btn.setAttribute("aria-expanded",on?"true":"false");note.hidden=!on;
@@ -974,32 +1010,32 @@ function openForm(roomId,start){
   curOpen={roomId:roomId,start:start};
   var opts="";for(var k=1;k<=runs;k++){var mins=k*30;opts+='<option value="'+mins+'">'+mins+' min ('+dispTime(start)+' – '+dispTime(m2hhmm(hhmm2m(start)+mins))+')</option>';}
   formEl.innerHTML='<div class="note" role="status" aria-live="polite">Reserve <strong>'+esc(room.name)+'</strong> on '+esc(a.date)+' starting <strong>'+esc(dispTime(start))+'</strong>.</div>'
-    +'<form id="mcw-rf" novalidate aria-label="Reserve '+esc(room.name)+' at '+esc(dispTime(start))+'">'
-    +'<div class="fld"><label for="mcw-rf-dur">Length</label><select id="mcw-rf-dur">'+opts+'</select></div>'
-    +'<div class="fld"><label for="mcw-rf-first">First name</label><input type="text" id="mcw-rf-first" autocomplete="given-name" aria-describedby="mcw-rf-first-e"><div class="err" id="mcw-rf-first-e" data-e="first" role="alert"></div></div>'
-    +'<div class="fld"><label for="mcw-rf-last">Last name</label><input type="text" id="mcw-rf-last" autocomplete="family-name" aria-describedby="mcw-rf-last-e"><div class="err" id="mcw-rf-last-e" data-e="last" role="alert"></div></div>'
-    +'<div class="fld"><label for="mcw-rf-email">Email</label><input type="email" id="mcw-rf-email" autocomplete="email" aria-describedby="'+(DOMAINS.length?'mcw-rf-email-h ':'')+'mcw-rf-email-e">'+(DOMAINS.length?'<div class="hint" id="mcw-rf-email-h">Use your '+esc(domainsPhrase())+' address.</div>':'')+'<div class="err" id="mcw-rf-email-e" data-e="email" role="alert"></div></div>'
-    +'<input type="text" name="mcw_hp" style="display:none" tabindex="-1" autocomplete="off" aria-hidden="true">'
-    +'<button type="submit" class="go">Reserve</button><button type="button" class="cancel" id="mcw-rf-cancel">Cancel</button></form>';
+    +'<form id="rar-rf" novalidate aria-label="Reserve '+esc(room.name)+' at '+esc(dispTime(start))+'">'
+    +'<div class="fld"><label for="rar-rf-dur">Length</label><select id="rar-rf-dur">'+opts+'</select></div>'
+    +'<div class="fld"><label for="rar-rf-first">First name</label><input type="text" id="rar-rf-first" autocomplete="given-name" aria-describedby="rar-rf-first-e"><div class="err" id="rar-rf-first-e" data-e="first" role="alert"></div></div>'
+    +'<div class="fld"><label for="rar-rf-last">Last name</label><input type="text" id="rar-rf-last" autocomplete="family-name" aria-describedby="rar-rf-last-e"><div class="err" id="rar-rf-last-e" data-e="last" role="alert"></div></div>'
+    +'<div class="fld"><label for="rar-rf-email">Email</label><input type="email" id="rar-rf-email" autocomplete="email" aria-describedby="'+(DOMAINS.length?'rar-rf-email-h ':'')+'rar-rf-email-e">'+(DOMAINS.length?'<div class="hint" id="rar-rf-email-h">Use your '+esc(domainsPhrase())+' address.</div>':'')+'<div class="err" id="rar-rf-email-e" data-e="email" role="alert"></div></div>'
+    +'<input type="text" name="rar_hp" style="display:none" tabindex="-1" autocomplete="off" aria-hidden="true">'
+    +'<button type="submit" class="go">Reserve</button><button type="button" class="cancel" id="rar-rf-cancel">Cancel</button></form>';
   formEl.scrollIntoView({behavior:"smooth",block:"start"});
-  document.getElementById("mcw-rf-cancel").addEventListener("click",function(){formEl.innerHTML="";curOpen=null;var f=gridEl.querySelector('.slot.free[tabindex="0"]');if(f)f.focus();});
-  document.getElementById("mcw-rf").addEventListener("submit",function(e){e.preventDefault();submit(roomId,start);});
-  document.getElementById("mcw-rf-dur").focus(); // move keyboard focus into the form
+  document.getElementById("rar-rf-cancel").addEventListener("click",function(){formEl.innerHTML="";curOpen=null;var f=gridEl.querySelector('.slot.free[tabindex="0"]');if(f)f.focus();});
+  document.getElementById("rar-rf").addEventListener("submit",function(e){e.preventDefault();submit(roomId,start);});
+  document.getElementById("rar-rf-dur").focus(); // move keyboard focus into the form
 }
 function err(k,m){var e=formEl.querySelector('[data-e="'+k+'"]');if(e)e.textContent=m||"";}
 function submit(roomId,start){
-  var first=document.getElementById("mcw-rf-first").value.trim();
-  var last=document.getElementById("mcw-rf-last").value.trim();
-  var email=document.getElementById("mcw-rf-email").value.trim();
-  var dur=document.getElementById("mcw-rf-dur").value;
+  var first=document.getElementById("rar-rf-first").value.trim();
+  var last=document.getElementById("rar-rf-last").value.trim();
+  var email=document.getElementById("rar-rf-email").value.trim();
+  var dur=document.getElementById("rar-rf-dur").value;
   var ok=true, firstBad=null;err("first","");err("last","");err("email","");
-  if(!first){err("first","Required.");ok=false;firstBad=firstBad||"mcw-rf-first";}
-  if(!last){err("last","Required.");ok=false;firstBad=firstBad||"mcw-rf-last";}
-  if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)){err("email","Enter a valid email.");ok=false;firstBad=firstBad||"mcw-rf-email";}
-  else if(!domainOk(email)){err("email","Use an "+domainsPhrase()+" email address.");ok=false;firstBad=firstBad||"mcw-rf-email";}
+  if(!first){err("first","Required.");ok=false;firstBad=firstBad||"rar-rf-first";}
+  if(!last){err("last","Required.");ok=false;firstBad=firstBad||"rar-rf-last";}
+  if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)){err("email","Enter a valid email.");ok=false;firstBad=firstBad||"rar-rf-email";}
+  else if(!domainOk(email)){err("email","Use an "+domainsPhrase()+" email address.");ok=false;firstBad=firstBad||"rar-rf-email";}
   if(!ok){if(firstBad){document.getElementById(firstBad).focus();}return;}
   var fd=new FormData();
-  fd.append("_wpnonce",CFG.nonce);fd.append("mcw_hp",(formEl.querySelector('[name=mcw_hp]')||{}).value||"");
+  fd.append("_wpnonce",CFG.nonce);fd.append("rar_hp",(formEl.querySelector('[name=rar_hp]')||{}).value||"");
   fd.append("room_id",roomId);fd.append("date",AVAIL.date);fd.append("start",start);
   fd.append("duration",dur);fd.append("first",first);fd.append("last",last);fd.append("email",email);
   var btn=formEl.querySelector(".go");btn.disabled=true;btn.textContent="Reserving…";

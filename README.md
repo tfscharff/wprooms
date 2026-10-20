@@ -15,9 +15,27 @@ plugin. Replaces LibCal Spaces.
 
 Download the latest release zip, then in wp-admin: **Plugins → Add New → Upload Plugin**.
 
+### Upgrading from 1.x
+
+2.0.0 renamed the plugin folder from `mcw-reserve-a-room` to `reserve-a-room`, so
+WordPress sees it as a new plugin. Rooms, rules and bookings carry over automatically.
+
+1. **Plugins** → deactivate the old **Reserve a Room**, then delete it (this does not
+   delete rooms or bookings).
+2. Upload `reserve-a-room.zip` and activate it.
+
 ## Changelog
 
 This project uses [Semantic Versioning](https://semver.org/).
+
+### 2.0.0
+- **Breaking:** renamed the plugin's folder and file from `mcw-reserve-a-room` to `reserve-a-room`,
+  and dropped the "mcw" prefix from everything internal: settings, the bookings
+  table, REST API (`/wp-json/reserve-a-room/v1/…`), admin page URLs, and CSS
+  classes/ids. See **Upgrading from 1.x** above. Existing rooms, rules and
+  bookings move over automatically on activation, and cancel links in
+  confirmation emails sent by 1.x keep working.
+- Author is now Thomas Scharff.
 
 ### 1.2.0
 - New **Default time format** setting under Rules: choose whether the
