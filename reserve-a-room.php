@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       Reserve a Room
  * Description:        No-code study-room booking: staff manage rooms and rules under Reserve a Room in wp-admin; patrons book instantly with [reserve_a_room]. Bookable hours come from the Library Hours plugin. Replaces LibCal Spaces.
- * Version:           2.0.0
+ * Version:           2.1.0
  * Author:            Thomas Scharff
  * License:           GPL-2.0+
  * Requires at least: 5.6
@@ -15,7 +15,7 @@ define( 'RAR_OPTION', 'rar_rooms' );
 // Version is single-sourced from the plugin header above (SemVer 2.0.0), read via
 // get_file_data() so the constant can never drift from the canonical Version: field.
 define( 'RAR_VERSION', get_file_data( __FILE__, array( 'Version' => 'Version' ) )['Version'] );
-define( 'RAR_DB_VERSION', '1' );
+define( 'RAR_DB_VERSION', '2' );
 define( 'RAR_REPLY_TO', 'library@wheatoncollege.edu' );
 
 function rar_table() {
@@ -44,9 +44,26 @@ function rar_install() {
 		KEY booking_id (booking_id),
 		KEY slot_start (slot_start)
 	) {$charset};";
+	// Anonymous statistics: one row per finished, cancelled or turned-away reservation.
+	// Deliberately has no name, email or token column — patron data never lands here.
+	$stats     = rar_stats_table();
+	$sql_stats = "CREATE TABLE {$stats} (
+		id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+		kind VARCHAR(12) NOT NULL,
+		reason VARCHAR(12) NOT NULL DEFAULT '',
+		room_id VARCHAR(40) NOT NULL DEFAULT '',
+		room_name VARCHAR(190) NOT NULL DEFAULT '',
+		start_at DATETIME NULL,
+		duration_min SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+		created_at DATETIME NOT NULL,
+		cancelled_at DATETIME NULL,
+		PRIMARY KEY  (id),
+		KEY start_at (start_at),
+		KEY created_at (created_at)
+	) {$charset};";
 	rar_migrate_legacy();
 	require_once ABSPATH . 'wp-admin/includes/upgrade.php';
-	dbDelta( $sql );
+	dbDelta( array( $sql, $sql_stats ) );
 	update_option( 'rar_db_version', RAR_DB_VERSION );
 }
 
@@ -460,6 +477,7 @@ function rar_reserve( WP_REST_Request $req ) {
 	}
 	$domains = rar_get()['rules']['emailDomains'];
 	if ( ! rar_email_domain_allowed( $email, $domains ) ) {
+		rar_log_denied( 'domain', $room_id, $date, $start, $duration );
 		return new WP_Error( 'rar_email_domain', 'Reservations are limited to ' . rar_domains_phrase( $domains ) . ' email addresses.', array( 'status' => 400 ) );
 	}
 	if ( ! preg_match( '/^\d{4}-\d{2}-\d{2}$/', $date ) || ! preg_match( '/^\d{2}:\d{2}$/', $start ) ) {
@@ -508,6 +526,7 @@ function rar_reserve( WP_REST_Request $req ) {
 	if ( $dailyMax > 0 ) {
 		$already = rar_booked_minutes_on( $email, $date );
 		if ( $already + $duration > $dailyMax ) {
+			rar_log_denied( 'daily', $room_id, $date, $start, $duration );
 			return new WP_Error(
 				'rar_daily',
 				rar_daily_limit_message( $dailyMax, $already ),
@@ -518,7 +537,7 @@ function rar_reserve( WP_REST_Request $req ) {
 
 	// 6. Atomic multi-row insert. UNIQUE(room_id, slot_start) blocks any conflict, even concurrent ones.
 	$token   = wp_generate_password( 32, false );
-	$created = current_time( 'mysql' );
+	$created = rar_now()->format( 'Y-m-d H:i:s' ); // library time, same clock as slot_start, so lead time is exact
 	$table   = rar_table();
 	$tuples  = array();
 	$args    = array();
@@ -537,6 +556,7 @@ function rar_reserve( WP_REST_Request $req ) {
 
 	if ( false === $res ) {
 		if ( false !== stripos( (string) $wpdb->last_error, 'duplicate' ) ) {
+			rar_log_denied( 'taken', $room_id, $date, $start, $duration );
 			return new WP_Error( 'rar_taken', 'Sorry, that time was just booked. Please pick another slot.', array( 'status' => 409 ) );
 		}
 		return new WP_Error( 'rar_db', 'Something went wrong saving your reservation. Please try again.', array( 'status' => 500 ) );
@@ -548,6 +568,7 @@ function rar_reserve( WP_REST_Request $req ) {
 		$total = rar_booked_minutes_on( $email, $date );
 		if ( $total > $dailyMax ) {
 			$wpdb->delete( $table, array( 'booking_id' => $token ), array( '%s' ) );
+			rar_log_denied( 'daily', $room_id, $date, $start, $duration );
 			return new WP_Error(
 				'rar_daily',
 				rar_daily_limit_message( $dailyMax, $total - $duration ),
@@ -586,12 +607,11 @@ function rar_email_confirm( $to, $room_name, $date, $startHHMM, $endHHMM, $token
  *  Cancellation (tokenized link from the confirmation email)
  * ------------------------------------------------------------------ */
 
-function rar_cancel_booking( $token ) {
-	global $wpdb;
+/** Cancel a booking by token. $by ('patron' or 'staff') is kept, anonymously, for statistics. */
+function rar_cancel_booking( $token, $by = 'patron' ) {
 	$token = preg_replace( '/[^A-Za-z0-9]/', '', (string) $token );
 	if ( 32 !== strlen( $token ) ) { return 0; }
-	$table = rar_table();
-	return (int) $wpdb->query( $wpdb->prepare( "DELETE FROM {$table} WHERE booking_id = %s", $token ) );
+	return rar_retire_booking( $token, 'cancelled', $by );
 }
 
 add_action( 'template_redirect', function () {
@@ -630,6 +650,10 @@ add_action( 'admin_menu', function () {
 	add_submenu_page(
 		'reserve-a-room', 'Reservations', 'Reservations', 'edit_pages',
 		'reserve-a-room-reservations', 'rar_reservations_page'
+	);
+	add_submenu_page(
+		'reserve-a-room', 'Room statistics', 'Statistics', 'edit_pages',
+		'reserve-a-room-stats', 'rar_stats_page'
 	);
 } );
 
@@ -759,11 +783,12 @@ function rar_reservations_page() {
 	if ( isset( $_POST['rar_cancel_token'], $_POST['_wpnonce'] )
 		&& wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['_wpnonce'] ) ), 'rar_cancel' )
 		&& current_user_can( 'edit_pages' ) ) {
-		$n = rar_cancel_booking( sanitize_text_field( wp_unslash( $_POST['rar_cancel_token'] ) ) );
+		$n = rar_cancel_booking( sanitize_text_field( wp_unslash( $_POST['rar_cancel_token'] ) ), 'staff' );
 		echo '<div class="notice notice-success"><p>' . ( $n > 0 ? 'Reservation cancelled.' : 'Nothing to cancel.' ) . '</p></div>';
 	}
+	rar_purge_past();
 	$table = rar_table();
-	$now   = current_time( 'mysql' );
+	$now   = rar_now()->format( 'Y-m-d H:i:s' );
 	// One row per booking: min/max slot = start/end, +30 min on the last slot for the true end.
 	$rows = $wpdb->get_results( $wpdb->prepare(
 		"SELECT booking_id, room_id, first, last, email,
@@ -796,6 +821,684 @@ function rar_reservations_page() {
 	}
 	echo '</tbody></table></div>';
 }
+
+/* ------------------------------------------------------------------ *
+ *  Statistics: anonymous records, patron-data purge, dashboard, CSV
+ *
+ *  Patron data (name, email, cancel token) lives only in the slots table,
+ *  and only until a reservation ends or is cancelled. At that point the
+ *  booking is "retired": an anonymous row (room, start, length, when it
+ *  was booked, outcome) goes into the stats table and the slot rows are
+ *  deleted. Requests turned away (slot taken, daily limit, email domain)
+ *  are recorded the same way, so unmet demand shows up too.
+ * ------------------------------------------------------------------ */
+
+function rar_stats_table() {
+	global $wpdb;
+	return $wpdb->prefix . 'rar_stats';
+}
+
+function rar_room_name( $room_id ) {
+	foreach ( rar_get()['rooms'] as $r ) {
+		if ( $r['id'] === $room_id ) { return $r['name']; }
+	}
+	return 'Removed room';
+}
+
+/**
+ * Delete a booking's slot rows and keep an anonymous record of it.
+ * $kind: 'booked' (it ended) or 'cancelled'. Returns the number of slot rows deleted.
+ * The record is only written when this call did the delete, so a booking is never counted twice.
+ */
+function rar_retire_booking( $booking_id, $kind, $reason = '' ) {
+	global $wpdb;
+	$table = rar_table();
+	$b     = $wpdb->get_row( $wpdb->prepare(
+		"SELECT room_id, MIN(slot_start) AS start_at, MIN(created_at) AS created_at FROM {$table} WHERE booking_id = %s GROUP BY room_id", // phpcs:ignore WordPress.DB.PreparedSQL
+		$booking_id
+	) );
+	if ( ! $b ) { return 0; }
+	$n = (int) $wpdb->query( $wpdb->prepare( "DELETE FROM {$table} WHERE booking_id = %s", $booking_id ) ); // phpcs:ignore WordPress.DB.PreparedSQL
+	if ( $n > 0 ) {
+		$wpdb->insert( rar_stats_table(), array(
+			'kind'         => $kind,
+			'reason'       => $reason,
+			'room_id'      => $b->room_id,
+			'room_name'    => rar_room_name( $b->room_id ),
+			'start_at'     => $b->start_at,
+			'duration_min' => $n * 30,
+			'created_at'   => $b->created_at,
+			'cancelled_at' => 'cancelled' === $kind ? rar_now()->format( 'Y-m-d H:i:s' ) : null,
+		) );
+	}
+	return $n;
+}
+
+/** Record a request that couldn't be booked. $reason: 'taken', 'daily' or 'domain'. */
+function rar_log_denied( $reason, $room_id, $date, $start, $duration ) {
+	global $wpdb;
+	$valid = preg_match( '/^\d{4}-\d{2}-\d{2}$/', $date ) && preg_match( '/^\d{2}:\d{2}$/', $start )
+		&& false !== strtotime( $date . ' ' . $start );
+	// Only keep a room id that exists, so junk requests can't add phantom rooms to the dashboard.
+	if ( 'Removed room' === rar_room_name( (string) $room_id ) ) { $room_id = ''; }
+	$wpdb->insert( rar_stats_table(), array(
+		'kind'         => 'denied',
+		'reason'       => $reason,
+		'room_id'      => (string) $room_id,
+		'room_name'    => '' !== (string) $room_id ? rar_room_name( $room_id ) : '',
+		'start_at'     => $valid ? $date . ' ' . $start . ':00' : null,
+		'duration_min' => max( 0, min( 480, (int) $duration ) ),
+		'created_at'   => rar_now()->format( 'Y-m-d H:i:s' ),
+	) );
+}
+
+/** Retire every booking that has ended, deleting its patron data. Runs hourly and on admin page loads. */
+function rar_purge_past() {
+	global $wpdb;
+	$table = rar_table();
+	$now   = rar_now()->format( 'Y-m-d H:i:s' );
+	for ( $i = 0; $i < 20; $i++ ) { // bounded, in case a delete keeps failing
+		$ids = $wpdb->get_col( $wpdb->prepare(
+			"SELECT booking_id FROM {$table} GROUP BY booking_id HAVING DATE_ADD(MAX(slot_start), INTERVAL 30 MINUTE) <= %s LIMIT 200", // phpcs:ignore WordPress.DB.PreparedSQL
+			$now
+		) );
+		if ( ! $ids ) { break; }
+		foreach ( $ids as $id ) { rar_retire_booking( $id, 'booked' ); }
+		if ( count( $ids ) < 200 ) { break; }
+	}
+}
+add_action( 'rar_purge', 'rar_purge_past' );
+add_action( 'init', function () {
+	if ( ! wp_next_scheduled( 'rar_purge' ) ) { wp_schedule_event( time() + 60, 'hourly', 'rar_purge' ); }
+} );
+register_deactivation_hook( __FILE__, function () { wp_clear_scheduled_hook( 'rar_purge' ); } );
+
+/* --- Calculations --- */
+
+/** Timestamps for naive local 'Y-m-d H:i:s' strings. Treated as UTC so wall-clock fields come back unchanged via gmdate(). */
+function rar_ts( $local ) {
+	return strtotime( $local . ' UTC' );
+}
+
+function rar_shift_date( $date, $days ) {
+	return gmdate( 'Y-m-d', rar_ts( $date . ' 00:00:00' ) + $days * 86400 );
+}
+
+/** The dashboard's date range from ?from=&to=, defaulting to the last 30 days and capped at two years. */
+function rar_stats_range() {
+	$today = rar_now()->format( 'Y-m-d' );
+	$get   = function ( $k ) {
+		$v = isset( $_GET[ $k ] ) ? sanitize_text_field( wp_unslash( $_GET[ $k ] ) ) : ''; // phpcs:ignore WordPress.Security.NonceVerification
+		return preg_match( '/^\d{4}-\d{2}-\d{2}$/', $v ) && false !== strtotime( $v ) ? $v : '';
+	};
+	$to   = $get( 'to' ) ? $get( 'to' ) : $today;
+	$from = $get( 'from' ) ? $get( 'from' ) : rar_shift_date( $to, -29 );
+	if ( $from > $to ) { list( $from, $to ) = array( $to, $from ); }
+	$min = rar_shift_date( $to, -730 );
+	if ( $from < $min ) { $from = $min; }
+	return array( $from, $to );
+}
+
+function rar_pct( $num, $den ) {
+	return $den > 0 ? (int) min( 100, round( 100 * $num / $den ) ) : null;
+}
+
+function rar_lead_buckets() {
+	return array( 'Less than 1 hour' => 60, '1 to 24 hours' => 1440, '1 to 3 days' => 4320, '3 to 7 days' => 10080, 'More than 7 days' => PHP_INT_MAX );
+}
+
+function rar_reason_label( $reason ) {
+	$labels = array(
+		'taken'  => 'Time was already taken',
+		'daily'  => 'Over the daily limit',
+		'domain' => 'Email domain not allowed',
+		'patron' => 'Patron (email link)',
+		'staff'  => 'Staff',
+	);
+	return isset( $labels[ $reason ] ) ? $labels[ $reason ] : $reason;
+}
+
+/**
+ * Everything the dashboard and CSV show, for reservations starting between $from and $to (inclusive).
+ * "In use" compares booked room-time with open time from Library Hours × the current number of rooms.
+ */
+function rar_stats( $from, $to ) {
+	global $wpdb;
+	$table = rar_stats_table();
+	$next  = rar_shift_date( $to, 1 );
+	$rows  = $wpdb->get_results( $wpdb->prepare(
+		"SELECT kind, reason, room_id, room_name, start_at, duration_min, created_at, cancelled_at FROM {$table}
+		 WHERE COALESCE(start_at, created_at) >= %s AND COALESCE(start_at, created_at) < %s ORDER BY id", // phpcs:ignore WordPress.DB.PreparedSQL
+		$from . ' 00:00:00',
+		$next . ' 00:00:00'
+	), ARRAY_A );
+
+	$cfg       = rar_get();
+	$roomCount = count( $cfg['rooms'] );
+	$s         = array(
+		'from' => $from, 'to' => $to, 'roomCount' => $roomCount, 'hoursReady' => (bool) rar_hours_option(),
+		'booked' => 0, 'minutes' => 0, 'cancelled' => 0, 'denied' => 0, 'under1h' => 0,
+		'leads' => array(), 'openSlots' => 0, 'occSlots' => 0, 'fullHalfHours' => 0,
+		'rooms' => array(), 'hours' => array(), 'days' => array(), 'heat' => array(),
+		'lead' => array_fill_keys( array_keys( rar_lead_buckets() ), 0 ),
+		'length' => array(), 'cancelBy' => array( 'patron' => 0, 'staff' => 0 ),
+		'notice' => array( 'After it started' => 0, 'Less than 1 hour before' => 0, '1 to 24 hours before' => 0, 'More than a day before' => 0 ),
+		'deniedBy' => array( 'taken' => 0, 'daily' => 0, 'domain' => 0 ), 'weeks' => array(),
+	);
+	$current = array();
+	foreach ( $cfg['rooms'] as $r ) {
+		$current[ $r['id'] ]    = true;
+		$s['rooms'][ $r['id'] ] = array( 'name' => $r['name'], 'bookings' => 0, 'minutes' => 0, 'cancelled' => 0, 'denied' => 0, 'slots' => 0 );
+	}
+	for ( $d = 1; $d <= 7; $d++ ) {
+		$s['days'][ $d ] = array( 'occ' => 0, 'avail' => 0, 'minutes' => 0 );
+		$s['heat'][ $d ] = array();
+	}
+	$cell = function ( &$s, $dow, $h ) {
+		if ( ! isset( $s['heat'][ $dow ][ $h ] ) ) { $s['heat'][ $dow ][ $h ] = array( 'occ' => 0, 'avail' => 0, 'full' => 0 ); }
+		if ( ! isset( $s['hours'][ $h ] ) ) { $s['hours'][ $h ] = array( 'occ' => 0, 'avail' => 0 ); }
+	};
+
+	// Weeks (Monday start) across the range, so quiet weeks show as zero rather than disappearing.
+	$w = rar_ts( $from . ' 00:00:00' );
+	$w -= ( (int) gmdate( 'N', $w ) - 1 ) * 86400;
+	for ( $end = rar_ts( $to . ' 00:00:00' ); $w <= $end; $w += 7 * 86400 ) {
+		$s['weeks'][ gmdate( 'Y-m-d', $w ) ] = array( 'bookings' => 0, 'minutes' => 0 );
+	}
+
+	$occ = array(); // 'Y-m-d H:i' => rooms in use during that half-hour
+	foreach ( $rows as $row ) {
+		$rid = $row['room_id'];
+		if ( '' !== $rid && ! isset( $s['rooms'][ $rid ] ) ) {
+			$s['rooms'][ $rid ] = array( 'name' => $row['room_name'] ? $row['room_name'] : 'Removed room', 'bookings' => 0, 'minutes' => 0, 'cancelled' => 0, 'denied' => 0, 'slots' => 0 );
+		}
+		if ( 'denied' === $row['kind'] ) {
+			$s['denied']++;
+			if ( isset( $s['deniedBy'][ $row['reason'] ] ) ) { $s['deniedBy'][ $row['reason'] ]++; }
+			if ( '' !== $rid ) { $s['rooms'][ $rid ]['denied']++; }
+			continue;
+		}
+		$start = rar_ts( $row['start_at'] );
+		$dur   = (int) $row['duration_min'];
+		if ( 'cancelled' === $row['kind'] ) {
+			$s['cancelled']++;
+			$s['rooms'][ $rid ]['cancelled']++;
+			if ( isset( $s['cancelBy'][ $row['reason'] ] ) ) { $s['cancelBy'][ $row['reason'] ]++; }
+			$notice = $row['cancelled_at'] ? ( $start - rar_ts( $row['cancelled_at'] ) ) / 60 : 0;
+			$key    = $notice < 0 ? 'After it started' : ( $notice < 60 ? 'Less than 1 hour before' : ( $notice < 1440 ? '1 to 24 hours before' : 'More than a day before' ) );
+			$s['notice'][ $key ]++;
+			continue;
+		}
+		// A reservation that was kept.
+		$s['booked']++;
+		$s['minutes'] += $dur;
+		$s['rooms'][ $rid ]['bookings']++;
+		$s['rooms'][ $rid ]['minutes'] += $dur;
+		$s['length'][ $dur ] = isset( $s['length'][ $dur ] ) ? $s['length'][ $dur ] + 1 : 1;
+		$lead          = max( 0, (int) round( ( $start - rar_ts( $row['created_at'] ) ) / 60 ) );
+		$s['leads'][]  = $lead;
+		if ( $lead < 60 ) { $s['under1h']++; }
+		foreach ( rar_lead_buckets() as $label => $limit ) {
+			if ( $lead < $limit ) { $s['lead'][ $label ]++; break; }
+		}
+		$dow = (int) gmdate( 'N', $start );
+		$s['days'][ $dow ]['minutes'] += $dur;
+		$wk = gmdate( 'Y-m-d', $start - ( $dow - 1 ) * 86400 );
+		if ( isset( $s['weeks'][ $wk ] ) ) {
+			$s['weeks'][ $wk ]['bookings']++;
+			$s['weeks'][ $wk ]['minutes'] += $dur;
+		}
+		for ( $t = $start; $t < $start + $dur * 60; $t += 1800 ) {
+			$d = (int) gmdate( 'N', $t );
+			$h = (int) gmdate( 'G', $t );
+			$cell( $s, $d, $h );
+			$s['heat'][ $d ][ $h ]['occ']++;
+			$s['hours'][ $h ]['occ']++;
+			$s['days'][ $d ]['occ']++;
+			$s['rooms'][ $rid ]['slots']++;
+			$s['occSlots']++;
+			if ( isset( $current[ $rid ] ) ) { // "every room booked" means every room that exists now
+				$k         = gmdate( 'Y-m-d H:i', $t );
+				$occ[ $k ] = isset( $occ[ $k ] ) ? $occ[ $k ] + 1 : 1;
+			}
+		}
+	}
+
+	// Open time, from Library Hours, for each day in the range up to today.
+	$today = rar_now()->format( 'Y-m-d' );
+	$last  = min( $to, $today );
+	for ( $day = $from; $day <= $last; $day = rar_shift_date( $day, 1 ) ) {
+		$dow = (int) gmdate( 'N', rar_ts( $day . ' 00:00:00' ) );
+		foreach ( rar_candidate_slots( $day ) as $hhmm ) {
+			$h = (int) substr( $hhmm, 0, 2 );
+			$cell( $s, $dow, $h );
+			$s['heat'][ $dow ][ $h ]['avail']++;
+			$s['hours'][ $h ]['avail']++;
+			$s['days'][ $dow ]['avail']++;
+			$s['openSlots']++;
+			// Every room in use for this half-hour.
+			$k = $day . ' ' . $hhmm;
+			if ( $roomCount > 0 && isset( $occ[ $k ] ) && $occ[ $k ] >= $roomCount ) {
+				$s['heat'][ $dow ][ $h ]['full']++;
+				$s['fullHalfHours']++;
+			}
+		}
+	}
+	ksort( $s['hours'] );
+	ksort( $s['length'] );
+	sort( $s['leads'] );
+	$n                 = count( $s['leads'] );
+	$s['leadAvg']      = $n ? (int) round( array_sum( $s['leads'] ) / $n ) : null;
+	$s['leadMedian']   = $n ? ( $n % 2 ? $s['leads'][ intdiv( $n, 2 ) ] : (int) round( ( $s['leads'][ $n / 2 - 1 ] + $s['leads'][ $n / 2 ] ) / 2 ) ) : null;
+	$s['avgLen']       = $s['booked'] ? (int) round( $s['minutes'] / $s['booked'] ) : null;
+	$s['util']         = rar_pct( $s['occSlots'], $s['openSlots'] * $roomCount );
+	$s['cancelRate']   = rar_pct( $s['cancelled'], $s['booked'] + $s['cancelled'] );
+	$s['under1hPct']   = rar_pct( $s['under1h'], $s['booked'] );
+	unset( $s['leads'] );
+	uasort( $s['rooms'], function ( $a, $b ) { return $b['minutes'] - $a['minutes']; } );
+	return $s;
+}
+
+/* --- Formatting --- */
+
+function rar_hour_label( $h, $fmt12 ) {
+	if ( ! $fmt12 ) { return sprintf( '%02d:00', $h ); }
+	return ( 0 === $h % 12 ? 12 : $h % 12 ) . ( $h < 12 ? ' AM' : ' PM' );
+}
+
+function rar_day_names() {
+	return array( 1 => 'Monday', 2 => 'Tuesday', 3 => 'Wednesday', 4 => 'Thursday', 5 => 'Friday', 6 => 'Saturday', 7 => 'Sunday' );
+}
+
+/** Short human duration for lead times: "45 minutes", "5 hours", "2.5 days". */
+function rar_fmt_lead( $min ) {
+	if ( null === $min ) { return '—'; }
+	if ( $min < 60 ) { return $min . ( 1 === $min ? ' minute' : ' minutes' ); }
+	if ( $min < 2880 ) { $h = round( $min / 60, 1 ); return $h . ( 1.0 === (float) $h ? ' hour' : ' hours' ); }
+	return round( $min / 1440, 1 ) . ' days';
+}
+
+function rar_fmt_hours( $min ) {
+	return number_format_i18n( $min / 60, 0 === $min % 60 ? 0 : 1 );
+}
+
+/* --- Dashboard --- */
+
+/**
+ * A bar chart drawn as a table, so it reads correctly without the bars.
+ * $rows: list of array( label, value, display text ). $max: bar scale (null = largest value).
+ */
+function rar_stats_bars( $caption, $item_head, $value_head, $rows, $max = null ) {
+	if ( null === $max ) {
+		$max = 0;
+		foreach ( $rows as $r ) { $max = max( $max, $r[1] ); }
+	}
+	$o = '<table class="rar-bars"><caption>' . esc_html( $caption ) . '</caption><thead><tr><th scope="col">' . esc_html( $item_head )
+		. '</th><th scope="col" class="num">' . esc_html( $value_head ) . '</th><td aria-hidden="true"></td></tr></thead><tbody>';
+	foreach ( $rows as $r ) {
+		$w  = $max > 0 ? round( 100 * $r[1] / $max, 1 ) : 0;
+		$o .= '<tr><th scope="row">' . esc_html( $r[0] ) . '</th><td class="num">' . esc_html( $r[2] ) . '</td>'
+			. '<td class="bar" aria-hidden="true"><span style="width:' . esc_attr( $w ) . '%"></span></td></tr>';
+	}
+	return $o . '</tbody></table>';
+}
+
+function rar_stats_page() {
+	if ( ! current_user_can( 'edit_pages' ) ) { return; }
+	rar_purge_past();
+	list( $from, $to ) = rar_stats_range();
+	$s     = rar_stats( $from, $to );
+	$fmt12 = '12' === rar_get()['rules']['timeFormat'];
+	$days  = rar_day_names();
+	$today = rar_now()->format( 'Y-m-d' );
+	$page  = admin_url( 'admin.php?page=reserve-a-room-stats' );
+	$csv   = function ( $type ) use ( $from, $to ) {
+		return wp_nonce_url( admin_url( 'admin-post.php?action=rar_stats_csv&type=' . $type . '&from=' . $from . '&to=' . $to ), 'rar_stats_csv' );
+	};
+	$hasUtil = $s['hoursReady'] && $s['openSlots'] > 0 && $s['roomCount'] > 0;
+
+	echo rar_stats_css(); // phpcs:ignore WordPress.Security.EscapeOutput
+	echo '<div class="wrap rar-stats"><h1>Room statistics</h1>';
+	echo '<p class="lede">How the study rooms are used, for planning space and staffing. Once a reservation ends, the patron’s name and email are deleted. Only the room, time, length and when it was booked are kept.</p>';
+
+	// Filters: presets, custom range, downloads.
+	echo '<form class="filters" method="get" action="' . esc_url( admin_url( 'admin.php' ) ) . '"><input type="hidden" name="page" value="reserve-a-room-stats">';
+	echo '<div class="presets" role="group" aria-label="Quick ranges">';
+	foreach ( array( 7 => 'Last 7 days', 30 => 'Last 30 days', 90 => 'Last 90 days', 365 => 'Last 12 months' ) as $n => $label ) {
+		$pf  = rar_shift_date( $today, 1 - $n );
+		$cur = ( $pf === $from && $today === $to ) ? ' aria-current="true"' : '';
+		echo '<a href="' . esc_url( add_query_arg( array( 'from' => $pf, 'to' => $today ), $page ) ) . '"' . $cur . '>' . esc_html( $label ) . '</a>'; // phpcs:ignore WordPress.Security.EscapeOutput
+	}
+	echo '</div>';
+	echo '<label>From <input type="date" name="from" value="' . esc_attr( $from ) . '"></label>';
+	echo '<label>To <input type="date" name="to" value="' . esc_attr( $to ) . '"></label>';
+	echo '<button class="button">Show</button>';
+	echo '<span class="downloads">Download CSV: <a class="button" href="' . esc_url( $csv( 'summary' ) ) . '">Summary</a> <a class="button" href="' . esc_url( $csv( 'records' ) ) . '">Records</a></span>';
+	echo '</form>';
+
+	if ( 0 === $s['booked'] + $s['cancelled'] + $s['denied'] ) {
+		echo '<div class="empty"><p><strong>No reservations ended in this date range.</strong> A reservation is counted here once it ends or is cancelled. Pick a longer range, or check back after the rooms have been used.</p></div></div>';
+		return;
+	}
+
+	// Plain-language summary: the answers staff look for first.
+	$top_room = null;
+	foreach ( $s['rooms'] as $r ) { if ( $r['minutes'] > 0 ) { $top_room = $r; break; } }
+	$best_day = null; $best_day_v = -1; $best_h = null; $best_h_v = -1;
+	foreach ( $s['days'] as $d => $v ) {
+		$score = $hasUtil ? rar_pct( $v['occ'], $v['avail'] * $s['roomCount'] ) : $v['occ'];
+		if ( null !== $score && $score > $best_day_v ) { $best_day_v = $score; $best_day = $d; }
+	}
+	foreach ( $s['hours'] as $h => $v ) {
+		$score = $hasUtil ? rar_pct( $v['occ'], $v['avail'] * $s['roomCount'] ) : $v['occ'];
+		if ( null !== $score && $score > $best_h_v ) { $best_h_v = $score; $best_h = $h; }
+	}
+	$lines = array();
+	if ( $top_room ) {
+		$lines[] = esc_html( $top_room['name'] ) . ' was the most used room, with ' . esc_html( rar_fmt_hours( $top_room['minutes'] ) ) . ' hours booked.';
+	}
+	if ( $s['booked'] > 0 && $best_day_v > 0 && null !== $best_h ) {
+		$lines[] = 'Rooms were busiest on <strong>' . esc_html( $days[ $best_day ] ) . 's</strong>, and in the <strong>' . esc_html( rar_hour_label( $best_h, $fmt12 ) ) . '</strong> hour.';
+	}
+	if ( null !== $s['leadMedian'] ) {
+		$lines[] = 'Half of all reservations were made within ' . esc_html( rar_fmt_lead( $s['leadMedian'] ) ) . ' of the start time.';
+	}
+	if ( $lines ) { echo '<p class="summary">' . implode( ' ', $lines ) . '</p>'; } // phpcs:ignore WordPress.Security.EscapeOutput
+
+	// Key numbers.
+	$kpis = array(
+		array( 'Reservations', number_format_i18n( $s['booked'] ), rar_fmt_hours( $s['minutes'] ) . ' hours booked' ),
+		array( 'Rooms in use', $hasUtil ? $s['util'] . '%' : '—', $hasUtil ? 'of the time the library was open' : 'needs Library Hours' ),
+		array( 'Booked ahead', rar_fmt_lead( $s['leadMedian'] ), 'median; average ' . rar_fmt_lead( $s['leadAvg'] ) ),
+		array( 'Last-minute', null === $s['under1hPct'] ? '—' : $s['under1hPct'] . '%', 'booked less than an hour ahead' ),
+		array( 'Average length', null === $s['avgLen'] ? '—' : rar_fmt_minutes( $s['avgLen'] ), 'per reservation' ),
+		array( 'Cancelled', null === $s['cancelRate'] ? '—' : $s['cancelRate'] . '%', number_format_i18n( $s['cancelled'] ) . ' reservations' ),
+		array( 'Turned away', number_format_i18n( $s['denied'] ), 'requests that couldn’t be booked' ),
+	);
+	echo '<dl class="kpis">';
+	foreach ( $kpis as $k ) {
+		// "32.7 hours" -> big number, smaller unit, so values stay on one line.
+		$v = explode( ' ', $k[1], 2 );
+		echo '<div><dt>' . esc_html( $k[0] ) . '</dt><dd>' . esc_html( $v[0] ) . ( isset( $v[1] ) ? ' <span class="unit">' . esc_html( $v[1] ) . '</span>' : '' )
+			. '</dd><dd class="sub">' . esc_html( $k[2] ) . '</dd></div>';
+	}
+	echo '</dl>';
+
+	// Heatmap: share of open room-time in use, by weekday and hour.
+	echo '<section class="panel wide"><h2>When rooms are in use</h2>';
+	if ( $hasUtil ) {
+		$hours = array();
+		foreach ( $s['hours'] as $h => $v ) { if ( $v['avail'] > 0 ) { $hours[] = $h; } }
+		echo '<p class="hint">Each square shows how much of the open room-time was booked, for that weekday and hour. A dark ring means every room was booked at least once in that hour.</p>';
+		echo '<div class="scroll" tabindex="0" role="region" aria-label="When rooms are in use, by weekday and hour"><table class="rar-heat"><caption class="screen-reader-text">Percent of open room-time booked, by weekday (rows) and hour (columns)</caption><thead><tr><td></td>';
+		foreach ( $hours as $h ) { echo '<th scope="col">' . esc_html( rar_hour_label( $h, $fmt12 ) ) . '</th>'; }
+		echo '</tr></thead><tbody>';
+		foreach ( $days as $d => $name ) {
+			echo '<tr><th scope="row">' . esc_html( substr( $name, 0, 3 ) ) . '</th>';
+			foreach ( $hours as $h ) {
+				$c = isset( $s['heat'][ $d ][ $h ] ) ? $s['heat'][ $d ][ $h ] : array( 'occ' => 0, 'avail' => 0, 'full' => 0 );
+				if ( 0 === $c['avail'] ) {
+					echo '<td class="closed"><span class="screen-reader-text">Closed</span></td>';
+					continue;
+				}
+				$p     = rar_pct( $c['occ'], $c['avail'] * $s['roomCount'] );
+				$level = 0 === $p ? 0 : ( $p <= 10 ? 1 : ( $p <= 25 ? 2 : ( $p <= 50 ? 3 : ( $p <= 75 ? 4 : 5 ) ) ) );
+				$tip   = $name . ', ' . rar_hour_label( $h, $fmt12 ) . ': ' . $p . '% in use'
+					. ( $c['full'] ? '; every room booked for ' . ( $c['full'] * 30 ) . ' minutes in total' : '' );
+				echo '<td class="l' . (int) $level . ( $c['full'] ? ' full' : '' ) . '" title="' . esc_attr( $tip ) . '">' . (int) $p . '%'
+					. ( $c['full'] ? '<span class="screen-reader-text">, every room booked at times</span>' : '' ) . '</td>';
+			}
+			echo '</tr>';
+		}
+		echo '</tbody></table></div>';
+		echo '<div class="legend" aria-hidden="true"><span>Less used</span><i class="l0"></i><i class="l1"></i><i class="l2"></i><i class="l3"></i><i class="l4"></i><i class="l5"></i><span>More used</span><i class="closed"></i><span>Closed</span><i class="l3 full"></i><span>Every room booked</span></div>';
+		echo '<p class="hint">Every room was booked at the same time for ' . esc_html( rar_fmt_hours( $s['fullHalfHours'] * 30 ) ) . ' hours in this range. Open time comes from Library Hours, counted for the ' . (int) $s['roomCount'] . ' rooms set up now.</p>';
+	} else {
+		echo '<p class="hint">This needs the Library Hours plugin and at least one room, to know when rooms could be booked.</p>';
+	}
+	echo '</section>';
+
+	echo '<div class="panels">';
+
+	// Rooms.
+	echo '<section class="panel wide"><h2>Rooms</h2><div class="scroll" tabindex="0" role="region" aria-label="Rooms table"><table class="rar-bars rooms"><caption class="screen-reader-text">Use of each room</caption><thead><tr><th scope="col">Room</th><th scope="col" class="num">Reservations</th><th scope="col" class="num">Hours</th><th scope="col" class="num">In use</th><td aria-hidden="true"></td><th scope="col" class="num">Cancelled</th><th scope="col" class="num">Turned away</th></tr></thead><tbody>';
+	foreach ( $s['rooms'] as $r ) {
+		$p = $hasUtil ? rar_pct( $r['slots'], $s['openSlots'] ) : null;
+		echo '<tr><th scope="row">' . esc_html( $r['name'] ) . '</th><td class="num">' . esc_html( number_format_i18n( $r['bookings'] ) ) . '</td><td class="num">'
+			. esc_html( rar_fmt_hours( $r['minutes'] ) ) . '</td><td class="num">' . ( null === $p ? '—' : (int) $p . '%' ) . '</td><td class="bar" aria-hidden="true"><span style="width:' . (int) $p . '%"></span></td><td class="num">'
+			. esc_html( number_format_i18n( $r['cancelled'] ) ) . '</td><td class="num">' . esc_html( number_format_i18n( $r['denied'] ) ) . '</td></tr>';
+	}
+	echo '</tbody></table></div><p class="hint">“In use” is the share of open time each room was booked. “Turned away” counts requests for that room that failed, mostly because the time was already taken.</p></section>';
+
+	// Time of day and day of week.
+	$rows = array();
+	foreach ( $s['hours'] as $h => $v ) {
+		if ( 0 === $v['avail'] && 0 === $v['occ'] ) { continue; }
+		$p      = $hasUtil ? rar_pct( $v['occ'], $v['avail'] * $s['roomCount'] ) : null;
+		$rows[] = $hasUtil ? array( rar_hour_label( $h, $fmt12 ), (int) $p, $p . '%' ) : array( rar_hour_label( $h, $fmt12 ), $v['occ'], rar_fmt_hours( $v['occ'] * 30 ) . ' h' );
+	}
+	echo '<section class="panel"><h2>Busiest times of day</h2>' . rar_stats_bars( 'Share of open room-time booked, by hour', 'Hour', $hasUtil ? 'In use' : 'Booked', $rows, $hasUtil ? 100 : null ) . '</section>'; // phpcs:ignore WordPress.Security.EscapeOutput
+
+	$rows = array();
+	foreach ( $days as $d => $name ) {
+		$v      = $s['days'][ $d ];
+		$p      = $hasUtil ? rar_pct( $v['occ'], $v['avail'] * $s['roomCount'] ) : null;
+		$label  = $name . ( $hasUtil && 0 === $v['avail'] ? ' (closed)' : '' );
+		$rows[] = $hasUtil ? array( $label, (int) $p, null === $p ? '—' : $p . '%' ) : array( $name, $v['minutes'], rar_fmt_hours( $v['minutes'] ) . ' h' );
+	}
+	echo '<section class="panel"><h2>Busiest days of the week</h2>' . rar_stats_bars( 'Share of open room-time booked, by weekday', 'Day', $hasUtil ? 'In use' : 'Booked', $rows, $hasUtil ? 100 : null ) . '</section>'; // phpcs:ignore WordPress.Security.EscapeOutput
+
+	// Lead time and length.
+	$rows = array();
+	foreach ( $s['lead'] as $label => $n ) { $rows[] = array( $label, $n, number_format_i18n( $n ) . ' (' . (int) rar_pct( $n, $s['booked'] ) . '%)' ); }
+	echo '<section class="panel"><h2>How far ahead people book</h2>' . rar_stats_bars( 'Reservations by time between booking and start', 'Booked', 'Reservations', $rows ) // phpcs:ignore WordPress.Security.EscapeOutput
+		. '<p class="hint">Median ' . esc_html( rar_fmt_lead( $s['leadMedian'] ) ) . ', average ' . esc_html( rar_fmt_lead( $s['leadAvg'] ) ) . '.</p></section>';
+
+	$rows = array();
+	foreach ( $s['length'] as $min => $n ) { $rows[] = array( rar_fmt_minutes( $min ), $n, number_format_i18n( $n ) . ' (' . (int) rar_pct( $n, $s['booked'] ) . '%)' ); }
+	echo '<section class="panel"><h2>How long people book</h2>' . ( $rows ? rar_stats_bars( 'Reservations by length', 'Length', 'Reservations', $rows ) : '<p class="hint">No finished reservations yet.</p>' ) . '</section>'; // phpcs:ignore WordPress.Security.EscapeOutput
+
+	// Cancellations.
+	$rows = array();
+	foreach ( $s['notice'] as $label => $n ) { $rows[] = array( $label, $n, number_format_i18n( $n ) ); }
+	$by = array();
+	foreach ( $s['cancelBy'] as $k => $n ) { $by[] = array( rar_reason_label( $k ), $n, number_format_i18n( $n ) ); }
+	echo '<section class="panel"><h2>Cancellations</h2>';
+	if ( $s['cancelled'] > 0 ) {
+		echo rar_stats_bars( 'Cancellations by notice given', 'Cancelled', 'Count', $rows ) . rar_stats_bars( 'Cancellations by who cancelled', 'Cancelled by', 'Count', $by ); // phpcs:ignore WordPress.Security.EscapeOutput
+	} else {
+		echo '<p class="hint">No cancellations in this range.</p>';
+	}
+	echo '</section>';
+
+	// Turned away.
+	$rows = array();
+	foreach ( $s['deniedBy'] as $k => $n ) { $rows[] = array( rar_reason_label( $k ), $n, number_format_i18n( $n ) ); }
+	echo '<section class="panel"><h2>Requests turned away</h2>';
+	if ( $s['denied'] > 0 ) {
+		echo rar_stats_bars( 'Requests that couldn’t be booked, by reason', 'Reason', 'Requests', $rows ); // phpcs:ignore WordPress.Security.EscapeOutput
+		echo '<p class="hint">Each failed attempt counts, so one person retrying counts more than once. Many “already taken” requests suggest more rooms are needed at those times.</p>';
+	} else {
+		echo '<p class="hint">No requests were turned away in this range.</p>';
+	}
+	echo '</section>';
+
+	// Weekly trend.
+	$rows = array();
+	foreach ( $s['weeks'] as $wk => $v ) { $rows[] = array( 'Week of ' . wp_date( 'M j, Y', rar_ts( $wk . ' 12:00:00' ), new DateTimeZone( 'UTC' ) ), $v['minutes'], rar_fmt_hours( $v['minutes'] ) . ' h, ' . number_format_i18n( $v['bookings'] ) ); }
+	echo '<section class="panel wide"><h2>Week by week</h2>' . rar_stats_bars( 'Hours booked and reservations per week', 'Week', 'Hours, reservations', $rows ) . '</section>'; // phpcs:ignore WordPress.Security.EscapeOutput
+
+	echo '</div></div>';
+}
+
+function rar_stats_css() {
+	return <<<'HTML'
+<style>
+  .rar-stats{--ink:#1d2327;--muted:#50575e;--line:#dcdcde;--accent:#00539b;--track:#e7edf4;max-width:1180px;color:var(--ink)}
+  .rar-stats .lede{max-width:72ch;color:var(--muted);font-size:14px}
+  .rar-stats .filters{display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;background:#fff;border:1px solid var(--line);border-radius:8px;padding:12px 14px;margin:16px 0 8px}
+  .rar-stats .filters label{font-weight:600}
+  .rar-stats .filters input[type=date]{margin-left:4px}
+  .rar-stats .presets{display:inline-flex;flex-wrap:wrap;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+  .rar-stats .presets a{padding:5px 10px;text-decoration:none;color:var(--ink);background:#fff}
+  .rar-stats .presets a + a{border-left:1px solid var(--line)}
+  .rar-stats .presets a[aria-current]{background:var(--accent);color:#fff}
+  .rar-stats .presets a:focus{box-shadow:inset 0 0 0 2px #003b71;outline:0}
+  .rar-stats .downloads{margin-left:auto;color:var(--muted)}
+  .rar-stats .summary{font-size:1.3rem;line-height:1.55;max-width:62ch;margin:22px 0 6px}
+  .rar-stats .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));margin:18px 0 26px;border-top:3px solid var(--accent)}
+  .rar-stats .kpis > div{padding:12px 14px 4px 0;margin-right:14px;border-bottom:1px solid var(--line)}
+  .rar-stats .kpis dt{font-size:13px;color:var(--muted)}
+  .rar-stats .kpis dd{margin:0;font-size:1.9rem;font-weight:600;line-height:1.25;font-variant-numeric:tabular-nums}
+  .rar-stats .kpis dd.sub{font-size:12px;font-weight:400;color:var(--muted);line-height:1.4}
+  .rar-stats .panels{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,440px),1fr));gap:8px 36px}
+  .rar-stats .panel{padding:4px 0 18px}
+  .rar-stats .panel.wide{grid-column:1/-1}
+  .rar-stats .panel h2{font-size:1.1rem;margin:14px 0 10px;padding-top:12px;border-top:1px solid var(--line)}
+  .rar-stats .hint{color:var(--muted);font-size:13px;max-width:80ch}
+  .rar-stats .empty{background:#fff;border:1px solid var(--line);border-radius:8px;padding:6px 16px;max-width:72ch}
+  .rar-stats .scroll{overflow-x:auto}
+  .rar-stats .scroll:focus{outline:2px solid #003b71;outline-offset:2px}
+  .rar-stats .rar-heat{border-collapse:separate;border-spacing:3px;font-size:12px;font-variant-numeric:tabular-nums}
+  .rar-stats .rar-heat th{font-weight:600;color:var(--muted);white-space:nowrap;padding:2px 4px}
+  .rar-stats .rar-heat tbody th{text-align:left;color:var(--ink);padding-right:8px}
+  .rar-stats .rar-heat td{min-width:44px;height:34px;text-align:center;border-radius:4px}
+  .rar-stats .l0{background:#f3f6fa;color:#646970}
+  .rar-stats .l1{background:#dbe8f5}
+  .rar-stats .l2{background:#b4cfea}
+  .rar-stats .l3{background:#7fabd6}
+  .rar-stats .l4{background:#2f6fae;color:#fff}
+  .rar-stats .l5{background:#00396b;color:#fff}
+  .rar-stats .closed{background:repeating-linear-gradient(45deg,#fff,#fff 3px,#eceef0 3px,#eceef0 6px)}
+  .rar-stats .full{box-shadow:inset 0 0 0 3px #1d2327}
+  .rar-stats .l4.full,.rar-stats .l5.full{box-shadow:inset 0 0 0 3px #1d2327,inset 0 0 0 5px #fff}
+  .rar-stats .legend{display:flex;flex-wrap:wrap;align-items:center;gap:4px 6px;font-size:12px;color:var(--muted);margin:8px 0}
+  .rar-stats .legend i{display:inline-block;width:22px;height:16px;border-radius:3px}
+  .rar-stats .legend i.closed{margin-left:14px;border:1px solid var(--line)}
+  .rar-stats .legend i.full{margin-left:14px}
+  .rar-stats .rar-bars{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums;margin-bottom:8px}
+  .rar-stats .rar-bars caption{text-align:left;color:var(--muted);font-size:13px;padding-bottom:6px}
+  .rar-stats .rar-bars th,.rar-stats .rar-bars td{padding:5px 10px 5px 0;text-align:left;font-weight:400;border-bottom:1px solid #f0f0f1}
+  .rar-stats .rar-bars thead th{font-weight:600;color:var(--muted);font-size:12px}
+  .rar-stats .rar-bars tbody th{white-space:nowrap}
+  .rar-stats .rar-bars .num{text-align:right;white-space:nowrap}
+  .rar-stats .rar-bars td.bar{width:45%;padding-left:6px}
+  .rar-stats .rar-bars td.bar span{display:block;height:12px;min-width:2px;background:var(--accent);border-radius:0 4px 4px 0}
+  .rar-stats .rar-bars td.bar{background:linear-gradient(var(--track),var(--track)) no-repeat left center/100% 12px;background-origin:content-box;background-clip:content-box}
+  .rar-stats .rar-bars.rooms{min-width:640px}
+  .rar-stats .rar-bars.rooms td.bar{width:24%}
+  .rar-stats .kpis .unit{font-size:1rem;font-weight:400}
+  @media (max-width:782px){.rar-stats .downloads{margin-left:0}.rar-stats .summary{font-size:1.1rem}}
+</style>
+HTML;
+}
+
+/* --- CSV export --- */
+
+/** Stop spreadsheet apps treating a text cell as a formula. */
+function rar_csv_cell( $v ) {
+	if ( is_string( $v ) && '' !== $v && false !== strpos( "=+-@\t\r", $v[0] ) ) { return "'" . $v; }
+	return $v;
+}
+
+add_action( 'admin_post_rar_stats_csv', function () {
+	if ( ! current_user_can( 'edit_pages' ) ) { wp_die( 'You are not allowed to download room statistics.', 403 ); }
+	check_admin_referer( 'rar_stats_csv' );
+	rar_purge_past();
+	list( $from, $to ) = rar_stats_range();
+	$type  = ( isset( $_GET['type'] ) && 'records' === $_GET['type'] ) ? 'records' : 'summary';
+	$fmt12 = '12' === rar_get()['rules']['timeFormat'];
+	$days  = rar_day_names();
+
+	nocache_headers();
+	header( 'Content-Type: text/csv; charset=utf-8' );
+	header( 'Content-Disposition: attachment; filename="room-' . $type . '-' . $from . '-to-' . $to . '.csv"' );
+	$out = fopen( 'php://output', 'w' );
+	fwrite( $out, "\xEF\xBB\xBF" ); // BOM so Excel reads UTF-8
+	$put = function ( $row ) use ( $out ) { fputcsv( $out, array_map( 'rar_csv_cell', $row ), ',', '"', '\\' ); };
+
+	if ( 'records' === $type ) {
+		global $wpdb;
+		$table = rar_stats_table();
+		$rows  = $wpdb->get_results( $wpdb->prepare(
+			"SELECT kind, reason, room_name, start_at, duration_min, created_at, cancelled_at FROM {$table}
+			 WHERE COALESCE(start_at, created_at) >= %s AND COALESCE(start_at, created_at) < %s ORDER BY COALESCE(start_at, created_at)", // phpcs:ignore WordPress.DB.PreparedSQL
+			$from . ' 00:00:00',
+			rar_shift_date( $to, 1 ) . ' 00:00:00'
+		), ARRAY_A );
+		$put( array( 'outcome', 'reason', 'room', 'date', 'weekday', 'start', 'length_minutes', 'booked_or_requested_at', 'lead_time_minutes', 'cancelled_at' ) );
+		$outcome = array( 'booked' => 'reserved', 'cancelled' => 'cancelled', 'denied' => 'turned away' );
+		foreach ( $rows as $r ) {
+			$st = $r['start_at'] ? rar_ts( $r['start_at'] ) : null;
+			$put( array(
+				$outcome[ $r['kind'] ],
+				$r['reason'] ? rar_reason_label( $r['reason'] ) : '',
+				$r['room_name'],
+				$st ? gmdate( 'Y-m-d', $st ) : '',
+				$st ? $days[ (int) gmdate( 'N', $st ) ] : '',
+				$st ? gmdate( 'H:i', $st ) : '',
+				(int) $r['duration_min'],
+				$r['created_at'],
+				$st && 'denied' !== $r['kind'] ? max( 0, (int) round( ( $st - rar_ts( $r['created_at'] ) ) / 60 ) ) : '',
+				(string) $r['cancelled_at'],
+			) );
+		}
+		fclose( $out );
+		exit;
+	}
+
+	$s       = rar_stats( $from, $to );
+	$hasUtil = $s['hoursReady'] && $s['openSlots'] > 0 && $s['roomCount'] > 0;
+	$util    = function ( $occ, $avail ) use ( $s, $hasUtil ) { return $hasUtil ? rar_pct( $occ, $avail * $s['roomCount'] ) : ''; };
+	$put( array( 'section', 'item', 'measure', 'value' ) );
+	$put( array( 'Range', 'From', 'date', $from ) );
+	$put( array( 'Range', 'To', 'date', $to ) );
+	$put( array( 'Overview', 'Reservations', 'count', $s['booked'] ) );
+	$put( array( 'Overview', 'Hours booked', 'hours', round( $s['minutes'] / 60, 1 ) ) );
+	$put( array( 'Overview', 'Rooms in use', 'percent of open time', $hasUtil ? $s['util'] : '' ) );
+	$put( array( 'Overview', 'Average length', 'minutes', $s['avgLen'] ) );
+	$put( array( 'Overview', 'Median lead time', 'minutes', $s['leadMedian'] ) );
+	$put( array( 'Overview', 'Average lead time', 'minutes', $s['leadAvg'] ) );
+	$put( array( 'Overview', 'Booked less than 1 hour ahead', 'percent', $s['under1hPct'] ) );
+	$put( array( 'Overview', 'Cancelled', 'count', $s['cancelled'] ) );
+	$put( array( 'Overview', 'Cancellation rate', 'percent', $s['cancelRate'] ) );
+	$put( array( 'Overview', 'Turned away', 'count', $s['denied'] ) );
+	$put( array( 'Overview', 'Every room booked at once', 'hours', round( $s['fullHalfHours'] / 2, 1 ) ) );
+	foreach ( $s['rooms'] as $r ) {
+		$put( array( 'Room', $r['name'], 'reservations', $r['bookings'] ) );
+		$put( array( 'Room', $r['name'], 'hours booked', round( $r['minutes'] / 60, 1 ) ) );
+		$put( array( 'Room', $r['name'], 'percent in use', $hasUtil ? rar_pct( $r['slots'], $s['openSlots'] ) : '' ) );
+		$put( array( 'Room', $r['name'], 'cancelled', $r['cancelled'] ) );
+		$put( array( 'Room', $r['name'], 'turned away', $r['denied'] ) );
+	}
+	foreach ( $s['hours'] as $h => $v ) {
+		$put( array( 'Time of day', rar_hour_label( $h, $fmt12 ), 'hours booked', $v['occ'] / 2 ) );
+		$put( array( 'Time of day', rar_hour_label( $h, $fmt12 ), 'percent in use', $util( $v['occ'], $v['avail'] ) ) );
+	}
+	foreach ( $days as $d => $name ) {
+		$put( array( 'Day of week', $name, 'hours booked', $s['days'][ $d ]['occ'] / 2 ) );
+		$put( array( 'Day of week', $name, 'percent in use', $util( $s['days'][ $d ]['occ'], $s['days'][ $d ]['avail'] ) ) );
+	}
+	foreach ( $days as $d => $name ) {
+		foreach ( $s['heat'][ $d ] as $h => $c ) {
+			if ( 0 === $c['avail'] && 0 === $c['occ'] ) { continue; }
+			$item = $name . ' ' . rar_hour_label( $h, $fmt12 );
+			$put( array( 'Day and hour', $item, 'percent in use', $util( $c['occ'], $c['avail'] ) ) );
+			$put( array( 'Day and hour', $item, 'minutes with every room booked', $c['full'] * 30 ) );
+		}
+	}
+	foreach ( $s['lead'] as $label => $n ) { $put( array( 'Booked ahead', $label, 'reservations', $n ) ); }
+	foreach ( $s['length'] as $min => $n ) { $put( array( 'Length', $min . ' minutes', 'reservations', $n ) ); }
+	foreach ( $s['cancelBy'] as $k => $n ) { $put( array( 'Cancelled by', rar_reason_label( $k ), 'count', $n ) ); }
+	foreach ( $s['notice'] as $label => $n ) { $put( array( 'Cancellation notice', $label, 'count', $n ) ); }
+	foreach ( $s['deniedBy'] as $k => $n ) { $put( array( 'Turned away', rar_reason_label( $k ), 'count', $n ) ); }
+	foreach ( $s['weeks'] as $wk => $v ) {
+		$put( array( 'Week starting', $wk, 'reservations', $v['bookings'] ) );
+		$put( array( 'Week starting', $wk, 'hours booked', round( $v['minutes'] / 60, 1 ) ) );
+	}
+	fclose( $out );
+	exit;
+} );
 
 /* ------------------------------------------------------------------ *
  *  Front-end  [reserve_a_room]

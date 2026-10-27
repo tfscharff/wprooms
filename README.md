@@ -10,6 +10,30 @@ plugin. Replaces LibCal Spaces.
 - Choose whether the booking grid shows 12-hour or 24-hour times by default
 - Confirmation and cancellation emails
 - Stores bookings in a dedicated database table
+- Statistics dashboard for space and staffing planning, with CSV export
+- Keeps no patron data once a reservation is over
+
+## Statistics and privacy
+
+**Reserve a Room → Statistics** shows how the rooms are used over any date range:
+
+- A weekday × hour heatmap of how much open room-time was booked, marking hours when
+  every room was booked at once
+- Most used rooms, busiest times of day and days of the week
+- How far ahead people book (median, average, and a breakdown), and how long they book for
+- Cancellations: rate, how much notice was given, and whether the patron or staff cancelled
+- Requests turned away because the time was taken, the daily limit was reached, or the
+  email domain wasn't allowed
+- Week-by-week hours and reservations
+
+Two CSV downloads cover the same range: a **Summary** of every figure above, and the
+anonymous **Records** behind them.
+
+Patron names, emails and cancel links are deleted as soon as a reservation ends (checked
+hourly) or is cancelled. Only an anonymous record is kept: room, date and time, length,
+when it was booked, and whether it was kept, cancelled or turned away. "In use"
+percentages compare booked time with open hours from Library Hours, for the rooms set up
+now.
 
 ## Install
 
@@ -27,6 +51,15 @@ WordPress sees it as a new plugin. Rooms, rules and bookings carry over automati
 ## Changelog
 
 This project uses [Semantic Versioning](https://semver.org/).
+
+### 2.1.0
+- New **Statistics** page: usage heatmap, rooms, busiest times and days, lead time,
+  booking length, cancellations, requests turned away and weekly trend, for any date range.
+- Download the statistics as CSV (summary or anonymous records).
+- Patron data is no longer kept after a reservation ends: an hourly job deletes the name,
+  email and cancel link and keeps only an anonymous record. Past reservations already in
+  the database are converted the first time it runs.
+- Failed booking attempts (time taken, daily limit, email domain) are counted.
 
 ### 2.0.0
 - **Breaking:** renamed the plugin's folder and file from `mcw-reserve-a-room` to `reserve-a-room`,
