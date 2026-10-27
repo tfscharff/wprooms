@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       Reserve a Room
  * Description:        No-code study-room booking: staff manage rooms and rules under Reserve a Room in wp-admin; patrons book instantly with [reserve_a_room]. Bookable hours come from the Library Hours plugin. Replaces LibCal Spaces.
- * Version:           2.1.0
+ * Version:           2.1.1
  * Author:            Thomas Scharff
  * License:           GPL-2.0+
  * Requires at least: 5.6
@@ -15,7 +15,7 @@ define( 'RAR_OPTION', 'rar_rooms' );
 // Version is single-sourced from the plugin header above (SemVer 2.0.0), read via
 // get_file_data() so the constant can never drift from the canonical Version: field.
 define( 'RAR_VERSION', get_file_data( __FILE__, array( 'Version' => 'Version' ) )['Version'] );
-define( 'RAR_DB_VERSION', '2' );
+define( 'RAR_DB_VERSION', '3' );
 define( 'RAR_REPLY_TO', 'library@wheatoncollege.edu' );
 
 function rar_table() {
@@ -61,10 +61,39 @@ function rar_install() {
 		KEY start_at (start_at),
 		KEY created_at (created_at)
 	) {$charset};";
+	$prev = (int) get_option( 'rar_db_version', 0 );
 	rar_migrate_legacy();
 	require_once ABSPATH . 'wp-admin/includes/upgrade.php';
 	dbDelta( array( $sql, $sql_stats ) );
+	if ( $prev > 0 && $prev < 3 ) { rar_fix_created_tz( $prev ); }
 	update_option( 'rar_db_version', RAR_DB_VERSION );
+}
+
+/**
+ * Before 2.1.0, created_at was saved on the WordPress clock (current_time()) instead of library
+ * time like slot_start, which skews lead times when the two time zones differ. Convert it once.
+ * From schema 1, every stored value predates the change. From schema 2 (2.1.0, published
+ * 2026-10-27 09:38 New York time), values before that are old, and so are values later than "now"
+ * in library time, which a library-time value can't be.
+ */
+function rar_fix_created_tz( $prev ) {
+	global $wpdb;
+	$wp  = wp_timezone();
+	$lib = new DateTimeZone( rar_tz() );
+	$now = rar_now()->format( 'Y-m-d H:i:s' );
+	foreach ( array( rar_table(), rar_stats_table() ) as $t ) {
+		if ( $t !== $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $t ) ) ) ) { continue; }
+		$where = $prev < 2 ? '1=1' : $wpdb->prepare( 'created_at < %s OR created_at > %s', '2026-10-27 09:38:00', $now );
+		$rows  = $wpdb->get_results( "SELECT id, created_at FROM `{$t}` WHERE {$where}" ); // phpcs:ignore WordPress.DB.PreparedSQL
+		foreach ( $rows as $r ) {
+			$d = date_create_immutable( $r->created_at, $wp );
+			if ( ! $d ) { continue; }
+			$fixed = $d->setTimezone( $lib )->format( 'Y-m-d H:i:s' );
+			if ( $fixed !== $r->created_at ) {
+				$wpdb->update( $t, array( 'created_at' => $fixed ), array( 'id' => (int) $r->id ), array( '%s' ), array( '%d' ) );
+			}
+		}
+	}
 }
 
 /**
@@ -1122,6 +1151,11 @@ function rar_fmt_hours( $min ) {
 	return number_format_i18n( $min / 60, 0 === $min % 60 ? 0 : 1 );
 }
 
+/** "1 hour", "2.5 hours". */
+function rar_fmt_hours_words( $min ) {
+	return rar_fmt_hours( $min ) . ( 60 === (int) $min ? ' hour' : ' hours' );
+}
+
 /* --- Dashboard --- */
 
 /**
@@ -1252,7 +1286,7 @@ function rar_stats_page() {
 		}
 		echo '</tbody></table></div>';
 		echo '<div class="legend" aria-hidden="true"><span>Less used</span><i class="l0"></i><i class="l1"></i><i class="l2"></i><i class="l3"></i><i class="l4"></i><i class="l5"></i><span>More used</span><i class="closed"></i><span>Closed</span><i class="l3 full"></i><span>Every room booked</span></div>';
-		echo '<p class="hint">Every room was booked at the same time for ' . esc_html( rar_fmt_hours( $s['fullHalfHours'] * 30 ) ) . ' hours in this range. Open time comes from Library Hours, counted for the ' . (int) $s['roomCount'] . ' rooms set up now.</p>';
+		echo '<p class="hint">Every room was booked at the same time for ' . esc_html( rar_fmt_hours_words( $s['fullHalfHours'] * 30 ) ) . ' in this range. Open time comes from Library Hours, counted for the ' . (int) $s['roomCount'] . ' rooms set up now.</p>';
 	} else {
 		echo '<p class="hint">This needs the Library Hours plugin and at least one room, to know when rooms could be booked.</p>';
 	}
@@ -1323,7 +1357,8 @@ function rar_stats_page() {
 	}
 	echo '</section>';
 
-	// Weekly trend.
+	// Weekly trend. Skip empty weeks before the first record, e.g. before the plugin was in use.
+	while ( $s['weeks'] && 0 === reset( $s['weeks'] )['bookings'] ) { array_shift( $s['weeks'] ); }
 	$rows = array();
 	foreach ( $s['weeks'] as $wk => $v ) { $rows[] = array( 'Week of ' . wp_date( 'M j, Y', rar_ts( $wk . ' 12:00:00' ), new DateTimeZone( 'UTC' ) ), $v['minutes'], rar_fmt_hours( $v['minutes'] ) . ' h, ' . number_format_i18n( $v['bookings'] ) ); }
 	echo '<section class="panel wide"><h2>Week by week</h2>' . rar_stats_bars( 'Hours booked and reservations per week', 'Week', 'Hours, reservations', $rows ) . '</section>'; // phpcs:ignore WordPress.Security.EscapeOutput

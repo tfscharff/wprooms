@@ -52,6 +52,13 @@ WordPress sees it as a new plugin. Rooms, rules and bookings carry over automati
 
 This project uses [Semantic Versioning](https://semver.org/).
 
+### 2.1.1
+- Fix lead times for reservations made before 2.1.0: their booking time was saved on the
+  WordPress clock rather than library time, so on sites where the two time zones differ they
+  looked hours later than they were. Corrected once, automatically, on update.
+- "Every room booked" now says "1 hour", not "1 hours".
+- The week-by-week list starts at the first week with reservations.
+
 ### 2.1.0
 - New **Statistics** page: usage heatmap, rooms, busiest times and days, lead time,
   booking length, cancellations, requests turned away and weekly trend, for any date range.
