@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       Reserve a Room
  * Description:        No-code study-room booking: staff manage rooms and rules under Reserve a Room in wp-admin; patrons book instantly with [reserve_a_room]. Bookable hours come from the Library Hours plugin. Replaces LibCal Spaces.
- * Version:           2.1.1
+ * Version:           2.2.0
  * Author:            Thomas Scharff
  * License:           GPL-2.0+
  * Requires at least: 5.6
@@ -205,14 +205,72 @@ function rar_sanitize( $in ) {
 			do { $id = rar_new_id(); } while ( isset( $used[ $id ] ) );
 		}
 		$used[ $id ] = true;
+		// Temporarily hidden (renovation, cleaning…): optional inclusive date range; blank ends = open-ended.
+		$hidden = ! empty( $room['hidden'] );
+		$from   = $hidden ? rar_sanitize_date( isset( $room['hideFrom'] ) ? $room['hideFrom'] : '' ) : '';
+		$until  = $hidden ? rar_sanitize_date( isset( $room['hideUntil'] ) ? $room['hideUntil'] : '' ) : '';
+		if ( '' !== $from && '' !== $until && $from > $until ) { list( $from, $until ) = array( $until, $from ); }
 		$out['rooms'][] = array(
-			'id'       => $id,
-			'name'     => $name,
-			'capacity' => isset( $room['capacity'] ) ? max( 0, (int) $room['capacity'] ) : 0,
-			'notes'    => isset( $room['notes'] ) ? sanitize_text_field( $room['notes'] ) : '',
+			'id'        => $id,
+			'name'      => $name,
+			'capacity'  => isset( $room['capacity'] ) ? max( 0, (int) $room['capacity'] ) : 0,
+			'notes'     => isset( $room['notes'] ) ? sanitize_text_field( $room['notes'] ) : '',
+			'hidden'    => $hidden,
+			'hideFrom'  => $from,
+			'hideUntil' => $until,
 		);
 	}
 	return $out;
+}
+
+/** 'Y-m-d' if valid, else ''. */
+function rar_sanitize_date( $d ) {
+	$d = (string) $d;
+	if ( ! preg_match( '/^(\d{4})-(\d{2})-(\d{2})$/', $d, $m ) ) { return ''; }
+	return checkdate( (int) $m[2], (int) $m[3], (int) $m[1] ) ? $d : '';
+}
+
+/** False while staff have the room hidden on $date ('Y-m-d'). */
+function rar_room_open_on( $room, $date ) {
+	if ( empty( $room['hidden'] ) ) { return true; }
+	if ( ! empty( $room['hideFrom'] ) && $date < $room['hideFrom'] ) { return true; }
+	if ( ! empty( $room['hideUntil'] ) && $date > $room['hideUntil'] ) { return true; }
+	return false;
+}
+
+/** booking_id => true for each upcoming reservation that falls on a day its room is hidden. */
+function rar_bookings_in_hidden_rooms() {
+	global $wpdb;
+	$rooms = array();
+	foreach ( rar_get()['rooms'] as $r ) {
+		if ( ! empty( $r['hidden'] ) ) { $rooms[ $r['id'] ] = $r; }
+	}
+	if ( ! $rooms ) { return array(); }
+	$table = rar_table();
+	$rows  = $wpdb->get_results( $wpdb->prepare(
+		"SELECT booking_id, room_id, MIN(slot_start) AS start_at FROM {$table} WHERE slot_start >= %s GROUP BY booking_id, room_id", // phpcs:ignore WordPress.DB.PreparedSQL
+		rar_now()->format( 'Y-m-d H:i:s' )
+	) );
+	$out = array();
+	foreach ( (array) $rows as $b ) {
+		if ( isset( $rooms[ $b->room_id ] ) && ! rar_room_open_on( $rooms[ $b->room_id ], substr( $b->start_at, 0, 10 ) ) ) {
+			$out[ $b->booking_id ] = true;
+		}
+	}
+	return $out;
+}
+
+/** Room fields the editor and booking widget need. */
+function rar_public_room( $r ) {
+	return array(
+		'id'        => $r['id'],
+		'name'      => $r['name'],
+		'capacity'  => $r['capacity'],
+		'notes'     => $r['notes'],
+		'hidden'    => ! empty( $r['hidden'] ),
+		'hideFrom'  => isset( $r['hideFrom'] ) ? $r['hideFrom'] : '',
+		'hideUntil' => isset( $r['hideUntil'] ) ? $r['hideUntil'] : '',
+	);
 }
 
 /** Normalize a list of email domains: lowercase, strip a leading "@", drop invalid entries and duplicates. */
@@ -371,9 +429,7 @@ add_action( 'rest_api_init', function () {
 			$cfg = rar_get();
 			return rest_ensure_response( array(
 				'rules'      => $cfg['rules'],
-				'rooms'      => array_map( function ( $r ) {
-					return array( 'id' => $r['id'], 'name' => $r['name'], 'capacity' => $r['capacity'], 'notes' => $r['notes'] );
-				}, $cfg['rooms'] ),
+				'rooms'      => array_map( 'rar_public_room', $cfg['rooms'] ),
 				'hoursReady' => (bool) rar_hours_option(),
 			) );
 		},
@@ -402,8 +458,9 @@ add_action( 'rest_api_init', function () {
 			}
 			$clean = rar_sanitize( $body );
 			update_option( RAR_OPTION, $clean );
-			// Echo the sanitized rules back so the editor shows what was actually stored.
-			return rest_ensure_response( array( 'ok' => true, 'rules' => $clean['rules'] ) );
+			// Echo the sanitized rules back so the editor shows what was actually stored, plus how many
+			// upcoming reservations now fall on days their room is hidden (staff may need to move them).
+			return rest_ensure_response( array( 'ok' => true, 'rules' => $clean['rules'], 'inHidden' => count( rar_bookings_in_hidden_rooms() ) ) );
 		},
 	) );
 } );
@@ -424,6 +481,10 @@ function rar_availability( WP_REST_Request $req ) {
 		return new WP_Error( 'rar_window', 'That date is outside the booking window.', array( 'status' => 400 ) );
 	}
 	$nowMin = ( $date === $today ) ? ( (int) $now->format( 'G' ) * 60 + (int) $now->format( 'i' ) ) : null;
+	$open   = array();
+	foreach ( $cfg['rooms'] as $r ) {
+		if ( rar_room_open_on( $r, $date ) ) { $open[] = rar_public_room( $r ); }
+	}
 	return rest_ensure_response( array(
 		'date'    => $date,
 		'blocks'  => rar_open_blocks( $date ),
@@ -431,7 +492,8 @@ function rar_availability( WP_REST_Request $req ) {
 		'slotMin' => (int) $cfg['rules']['slotMin'],
 		'maxMin'  => (int) $cfg['rules']['maxMin'],
 		'dailyMaxMin' => (int) $cfg['rules']['dailyMaxMin'],
-		'rooms'   => array_map( function ( $r ) { return array( 'id' => $r['id'], 'name' => $r['name'], 'notes' => $r['notes'], 'capacity' => $r['capacity'] ); }, $cfg['rooms'] ),
+		'rooms'   => $open,
+		'roomsHidden' => count( $cfg['rooms'] ) - count( $open ),
 		'taken'   => rar_taken_for_date( $date ),
 		'nowMin'  => $nowMin,
 	) );
@@ -519,6 +581,9 @@ function rar_reserve( WP_REST_Request $req ) {
 	foreach ( $cfg['rooms'] as $r ) { if ( $r['id'] === $room_id ) { $room = $r; break; } }
 	if ( ! $room ) {
 		return new WP_Error( 'rar_room', 'That room is not available.', array( 'status' => 400 ) );
+	}
+	if ( preg_match( '/^\d{4}-\d{2}-\d{2}$/', $date ) && ! rar_room_open_on( $room, $date ) ) {
+		return new WP_Error( 'rar_room_hidden', 'That room isn’t available on that date. Please reload the page and choose another room.', array( 'status' => 400 ) );
 	}
 	$maxMin = (int) $cfg['rules']['maxMin'];
 	if ( $duration < 30 || $duration > $maxMin || 0 !== $duration % 30 ) {
@@ -721,6 +786,15 @@ function rar_editor_markup() {
   #rar-admin .bar{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:8px}
   #rar-admin .status{font-weight:600}
   #rar-admin .hint{font-size:.82rem;color:var(--muted);margin:6px 0 0}
+  #rar-admin .hide{margin-top:12px;padding-top:10px;border-top:1px solid var(--line)}
+  #rar-admin .hide label.chk{display:inline-flex;align-items:center;gap:6px;font-size:.9rem;color:#1a1a1a;margin:0}
+  #rar-admin .hide .dates{display:flex;flex-wrap:wrap;gap:8px 16px;align-items:center;margin-top:8px}
+  #rar-admin .hide .dates[hidden]{display:none}
+  #rar-admin .hide .dates label{display:inline;font-size:.85rem;color:#1a1a1a;margin:0}
+  #rar-admin .hide .dates .hint{flex-basis:100%;margin:0}
+  #rar-admin .hide input[type=date]{font:inherit;padding:4px 6px;border:1px solid var(--line);border-radius:6px}
+  #rar-admin .card.is-hidden{border-style:dashed;border-color:#8c8f94;background:#f6f7f7}
+  #rar-admin .card.is-hidden .num{color:#646970}
 </style>
 <div id="rar-admin">
   <div class="card">
@@ -764,8 +838,45 @@ function renderRooms(){
     grid.appendChild(field("Name",room,"name","text","full"));
     grid.appendChild(field("Capacity",room,"capacity","number",""));
     grid.appendChild(field("Notes (optional)",room,"notes","text","full"));
-    card.appendChild(grid);wrap.appendChild(card);
+    card.appendChild(grid);
+    card.appendChild(hideControls(room,card,num,i));
+    wrap.appendChild(card);
   });
+}
+function today(){var d=new Date(),p=function(n){return n<10?"0"+n:""+n;};return d.getFullYear()+"-"+p(d.getMonth()+1)+"-"+p(d.getDate());}
+function hideStatus(room){
+  if(!room.hidden)return "";
+  var t=today(),f=room.hideFrom||"",u=room.hideUntil||"";
+  if(u&&u<t)return "This period is over, so patrons can book the room again. Untick “Hide” to clear it.";
+  var when=(f?" from "+f:"")+(u?" through "+u:" until you untick “Hide”");
+  return (f&&f>t?"Will be hidden":"Hidden")+when+". Patrons can’t see or book it then. Existing reservations are kept and flagged on the Reservations page.";
+}
+// "Hide" checkbox plus optional From/Until dates (inclusive; blank = open-ended).
+function hideControls(room,card,num,i){
+  var box=el("div","hide");
+  var lab=el("label","chk");var cb=el("input");cb.type="checkbox";cb.checked=!!room.hidden;
+  lab.appendChild(cb);lab.appendChild(document.createTextNode(" Hide this room temporarily (renovation, cleaning…)"));
+  var dates=el("div","dates");
+  function dateField(text,key){
+    var l=el("label");l.appendChild(document.createTextNode(text+" "));
+    var d=el("input");d.type="date";d.value=room[key]||"";d.oninput=function(){room[key]=d.value;sync();};
+    l.appendChild(d);dates.appendChild(l);
+  }
+  dateField("From","hideFrom");dateField("Until","hideUntil");
+  var st=el("p","hint");st.id="rar-admin-hide-"+i;st.setAttribute("aria-live","polite");
+  cb.setAttribute("aria-describedby",st.id);
+  var tip=el("p","hint");tip.textContent="Leave From blank to start today, and Until blank to keep it hidden until you untick this.";
+  dates.appendChild(tip);
+  function sync(){
+    dates.hidden=!cb.checked;st.textContent=hideStatus(room);
+    card.classList.toggle("is-hidden",!!room.hidden);
+    var t=today(),tag="";
+    if(room.hidden)tag=room.hideUntil&&room.hideUntil<t?" (hiding ended)":(room.hideFrom&&room.hideFrom>t?" (hiding scheduled)":" (hidden)");
+    num.textContent="Room "+(i+1)+tag;
+  }
+  cb.onchange=function(){room.hidden=cb.checked;sync();};
+  box.appendChild(lab);box.appendChild(dates);box.appendChild(st);sync();
+  return box;
 }
 function field(label,obj,key,type,cls){
   var cell=el("div",cls);var lab=el("label");lab.textContent=label;
@@ -781,7 +892,7 @@ function fillRules(){
   document.getElementById("rar-admin-domains").value=(data.rules.emailDomains||[]).join("\n");
 }
 function flash(m,bad){var s=document.getElementById("rar-admin-status");s.textContent=m;s.style.color=bad?"#b42318":"#1a7f37";}
-document.getElementById("rar-admin-add").onclick=function(){data.rooms.push({id:"",name:"",capacity:4,notes:""});renderRooms();};
+document.getElementById("rar-admin-add").onclick=function(){data.rooms.push({id:"",name:"",capacity:4,notes:"",hidden:false,hideFrom:"",hideUntil:""});renderRooms();};
 document.getElementById("rar-admin-save").onclick=function(){
   data.rules.maxMin=parseInt(document.getElementById("rar-admin-max").value||"120",10);
   data.rules.advanceDays=parseInt(document.getElementById("rar-admin-adv").value||"14",10);
@@ -792,11 +903,15 @@ document.getElementById("rar-admin-save").onclick=function(){
   flash("Saving…");
   fetch(RAR_ADMIN.root,{method:"POST",headers:{"Content-Type":"application/json","X-WP-Nonce":RAR_ADMIN.nonce},body:JSON.stringify(data)})
     .then(function(r){if(!r.ok)throw 0;return r.json();})
-    .then(function(d){if(d&&d.rules){data.rules=d.rules;fillRules();}flash("Saved — it's live. ✓");})
+    .then(function(d){
+      if(d&&d.rules){data.rules=d.rules;fillRules();}
+      var n=d&&d.inHidden||0;
+      flash("Saved — it's live. ✓"+(n?" "+n+(n===1?" upcoming reservation is":" upcoming reservations are")+" on a day its room is hidden. See Reservations.":""));
+    })
     .catch(function(){flash("Save failed — please try again or reload.",true);});
 };
 fetch(RAR_ADMIN.root).then(function(r){return r.json();}).then(function(d){
-  data.rooms=(d.rooms||[]).map(function(x){return{id:x.id,name:x.name,capacity:x.capacity,notes:x.notes};});
+  data.rooms=(d.rooms||[]).map(function(x){return{id:x.id,name:x.name,capacity:x.capacity,notes:x.notes,hidden:!!x.hidden,hideFrom:x.hideFrom||"",hideUntil:x.hideUntil||""};});
   data.rules=d.rules||data.rules;
   fillRules();
   renderRooms();
@@ -835,13 +950,20 @@ function rar_reservations_page() {
 		echo '<p>No upcoming reservations.</p></div>';
 		return;
 	}
+	$inHidden = rar_bookings_in_hidden_rooms();
+	if ( $inHidden ) {
+		$n = count( $inHidden );
+		echo '<div class="notice notice-warning inline"><p><strong>' . (int) $n . ( 1 === $n ? ' reservation is' : ' reservations are' )
+			. ' on a day its room is hidden.</strong> They are marked below. Contact the patron or cancel the reservation; it won’t be cancelled automatically.</p></div>';
+	}
 	echo '<table class="widefat striped"><thead><tr><th>Room</th><th>Date</th><th>Time</th><th>Patron</th><th>Email</th><th></th></tr></thead><tbody>';
 	foreach ( $rows as $r ) {
 		$room  = isset( $names[ $r->room_id ] ) ? $names[ $r->room_id ] : '(removed room)';
 		$start = substr( $r->start_at, 11, 5 );
 		$end   = gmdate( 'H:i', strtotime( $r->last_slot ) + 30 * 60 );
 		$date  = substr( $r->start_at, 0, 10 );
-		echo '<tr><td>' . esc_html( $room ) . '</td><td>' . esc_html( $date ) . '</td><td>' . esc_html( $start . ' – ' . $end )
+		$flag  = isset( $inHidden[ $r->booking_id ] ) ? '<br><strong style="color:#b42318">Room hidden this day</strong>' : '';
+		echo '<tr><td>' . esc_html( $room ) . $flag . '</td><td>' . esc_html( $date ) . '</td><td>' . esc_html( $start . ' – ' . $end )
 			. '</td><td>' . esc_html( $r->first . ' ' . $r->last ) . '</td><td>' . esc_html( $r->email ) . '</td><td>'
 			. '<form method="post" onsubmit="return confirm(\'Cancel this reservation?\')" style="margin:0">'
 			. wp_nonce_field( 'rar_cancel', '_wpnonce', true, false )
@@ -1674,7 +1796,7 @@ function load(date){
 function renderGrid(){
   var a=AVAIL;
   if(!a.slots||a.slots.length===0){gridEl.innerHTML='<p class="rar-rooms__note">The library is closed on this date — no rooms are bookable.</p>';return;}
-  if(!a.rooms||a.rooms.length===0){gridEl.innerHTML='<p class="rar-rooms__note">No rooms are set up yet.</p>';return;}
+  if(!a.rooms||a.rooms.length===0){gridEl.innerHTML='<p class="rar-rooms__note">'+(a.roomsHidden?'No rooms are available to book on this date. Please choose another date.':'No rooms are set up yet.')+'</p>';return;}
   var cols=a.slots, COLS=cols.length, ROWS=a.rooms.length;
   var html='<p class="rar-rooms__legend rar-rooms__kbd">Keyboard: press Tab to reach the grid, use the arrow keys to move between available times, then press Enter to book.</p>'
     +'<div class="rar-rooms__scroll"><table>'

@@ -10,6 +10,7 @@ plugin. Replaces LibCal Spaces.
 - Choose whether the booking grid shows 12-hour or 24-hour times by default
 - Confirmation and cancellation emails
 - Stores bookings in a dedicated database table
+- Hide a room temporarily (renovation, cleaning) for a date range or until you turn it back on
 - Statistics dashboard for space and staffing planning, with CSV export
 - Keeps no patron data once a reservation is over
 
@@ -51,6 +52,15 @@ WordPress sees it as a new plugin. Rooms, rules and bookings carry over automati
 ## Changelog
 
 This project uses [Semantic Versioning](https://semver.org/).
+
+### 2.2.0
+- Hide a room temporarily: tick **Hide this room temporarily** on the room, and optionally
+  set **From** and **Until** dates (both inclusive; leave either blank for open-ended). While
+  hidden, the room is left out of the booking grid and can't be booked. It comes back by
+  itself after the Until date.
+- Reservations already made for those days are kept, not cancelled. The Reservations page
+  flags them so staff can contact the patron or cancel, and saving the editor says how many
+  there are.
 
 ### 2.1.1
 - Fix lead times for reservations made before 2.1.0: their booking time was saved on the
