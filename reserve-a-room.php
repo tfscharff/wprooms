@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       Reserve a Room
  * Description:        No-code study-room booking: staff manage rooms and rules under Reserve a Room in wp-admin; patrons book instantly with [reserve_a_room]. Bookable hours come from the Library Hours plugin. Replaces LibCal Spaces.
- * Version:           2.2.0
+ * Version:           2.2.1
  * Author:            Thomas Scharff
  * License:           GPL-2.0+
  * Requires at least: 5.6

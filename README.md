@@ -64,6 +64,11 @@ The `tests/` folder is not part of the release zip.
 
 This project uses [Semantic Versioning](https://semver.org/).
 
+### 2.2.1
+- Fix PHP warnings when a settings save contains malformed values (for example a list where
+  the time format, a room id, a hide date or an email domain should be text). Such values are
+  now ignored quietly. Normal saves from the editor are unchanged.
+
 ### 2.2.0
 - Hide a room temporarily: tick **Hide this room temporarily** on the room, and optionally
   set **From** and **Until** dates (both inclusive; leave either blank for open-ended). While
