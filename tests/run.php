@@ -59,7 +59,7 @@ function get_option( $k, $default = false ) { return array_key_exists( $k, $GLOB
 function update_option( $k, $v ) { $GLOBALS['rar_options'][ $k ] = $v; return true; }
 function add_option( $k, $v ) { if ( ! array_key_exists( $k, $GLOBALS['rar_options'] ) ) { $GLOBALS['rar_options'][ $k ] = $v; } return true; }
 function delete_option( $k ) { unset( $GLOBALS['rar_options'][ $k ] ); return true; }
-function sanitize_text_field( $s ) { return trim( preg_replace( '/[\r\n\t ]+/', ' ', strip_tags( (string) $s ) ) ); }
+function sanitize_text_field( $s ) { if ( is_object( $s ) || is_array( $s ) ) { return ''; } return trim( preg_replace( '/[\r\n\t ]+/', ' ', strip_tags( (string) $s ) ) ); }
 function sanitize_email( $s ) { return preg_replace( '/[^a-z0-9@._+\-]/i', '', (string) $s ); }
 function is_email( $s ) { return (bool) preg_match( '/^[^@\s]+@[^@\s]+\.[a-z]{2,}$/i', $s ); }
 function wp_unslash( $s ) { return $s; }

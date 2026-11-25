@@ -159,6 +159,36 @@ ok( false === $r[0]['hidden'] && '' === $r[0]['hideFrom'] && '' === $r[0]['hideU
 eq( true, $rooms( array( array( 'name' => 'A', 'hidden' => 'yes' ) ) )[0]['hidden'], 'any truthy hidden value hides the room' );
 eq( false, $rooms( array( array( 'name' => 'A', 'hidden' => '0' ) ) )[0]['hidden'], 'hidden "0" does not hide' );
 
+/* ---------------- rar_sanitize: array/object/null input raises no warning ---------------- */
+
+// Run $fn with every warning and notice recorded; returns [result, messages].
+function quiet_run( $fn ) {
+	$msgs = array();
+	set_error_handler( function ( $no, $str ) use ( &$msgs ) { $msgs[] = $str; return true; } );
+	try { $res = $fn(); } finally { restore_error_handler(); }
+	return array( $res, $msgs );
+}
+$odd = array( 'array' => array( 'x' ), 'nested' => array( array( 'a.edu' ) ), 'object' => new stdClass(), 'null' => null, 'true' => true, 'false' => false );
+foreach ( $odd as $label => $v ) {
+	list( $res, $m ) = quiet_run( function () use ( $v ) { return rar_sanitize( array( 'rules' => array( 'timeFormat' => $v ) ) )['rules']['timeFormat']; } );
+	eq( '24', $res, "timeFormat $label falls back to 24" );
+	eq( array(), $m, "timeFormat $label raises no warning" );
+}
+list( $res, $m ) = quiet_run( function () { return rar_sanitize( array( 'rules' => array( 'timeFormat' => '12' ) ) )['rules']['timeFormat']; } );
+eq( array( '12', array() ), array( $res, $m ), 'timeFormat 12 still works without warning' );
+foreach ( $odd as $label => $v ) {
+	list( $res, $m ) = quiet_run( function () use ( $v ) { return rar_sanitize( array( 'rules' => array( 'emailDomains' => $v ) ) )['rules']['emailDomains']; } );
+	eq( array(), $m, "emailDomains $label raises no warning" );
+	list( $res, $m ) = quiet_run( function () use ( $v ) { return rar_sanitize( array( 'rooms' => array( array( 'name' => 'A', 'id' => $v, 'capacity' => is_object( $v ) ? 0 : $v, 'notes' => $v, 'hidden' => true, 'hideFrom' => $v, 'hideUntil' => $v ) ) ) )['rooms']; } );
+	eq( array(), $m, "room fields $label raise no warning" );
+	ok( isset( $res[0] ) && 1 === preg_match( '/^[a-z0-9]+$/', $res[0]['id'] ) && '' === $res[0]['hideFrom'] && '' === $res[0]['hideUntil'], "room $label: id regenerated or kept clean, dates blank" );
+	if ( true === $v ) { continue; } // name "1" is a valid name
+	list( $res, $m ) = quiet_run( function () use ( $v ) { return rar_sanitize( array( 'rooms' => array( array( 'name' => $v ) ) ) )['rooms']; } );
+	eq( array( array(), array() ), array( $res, $m ), "room name $label: dropped quietly" );
+}
+list( $res, $m ) = quiet_run( function () { return rar_sanitize_domains( array( 'a.edu', array( 'b.edu' ), null, new stdClass(), 'c.edu' ) ); } );
+eq( array( array( 'a.edu', 'c.edu' ), array() ), array( $res, $m ), 'domain list skips non-scalar entries quietly' );
+
 /* ---------------- dates, hidden rooms, public room ---------------- */
 
 eq( '2027-02-28', rar_sanitize_date( '2027-02-28' ), 'valid date kept' );

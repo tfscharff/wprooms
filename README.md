@@ -53,6 +53,11 @@ WordPress sees it as a new plugin. Rooms, rules and bookings carry over automati
 
 Tests need only PHP, no Composer: `php tests/run.php` (add `-q` for failures and a summary
 only). `tests/run.php` stubs WordPress and the database; `tests/cases.php` holds the cases.
+
+The widget and editor JavaScript is tested with Node's built-in runner (no npm install):
+`node --test "tests/js/*.test.mjs"`. The tests read the real scripts out of
+`reserve-a-room.php` and run them against a small fake DOM.
+
 The `tests/` folder is not part of the release zip.
 
 ## Changelog

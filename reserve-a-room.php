@@ -188,7 +188,7 @@ function rar_sanitize( $in ) {
 	}
 	$out['rules']['dailyMaxMin'] = $daily;
 	// Default time display in the booking widget: '24' or '12'. Patrons can still toggle.
-	$out['rules']['timeFormat'] = ( isset( $r['timeFormat'] ) && '12' === (string) $r['timeFormat'] ) ? '12' : '24';
+	$out['rules']['timeFormat'] = ( isset( $r['timeFormat'] ) && is_scalar( $r['timeFormat'] ) && '12' === (string) $r['timeFormat'] ) ? '12' : '24';
 	// Allowed email domains (empty = anyone). Accepts an array or a comma/space/newline-separated string.
 	$out['rules']['emailDomains'] = rar_sanitize_domains( isset( $r['emailDomains'] ) ? $r['emailDomains'] : array() );
 
@@ -198,7 +198,7 @@ function rar_sanitize( $in ) {
 		if ( ! is_array( $room ) ) { continue; }
 		$name = isset( $room['name'] ) ? sanitize_text_field( $room['name'] ) : '';
 		if ( '' === $name ) { continue; }
-		$id = isset( $room['id'] ) ? preg_replace( '/[^a-z0-9]/', '', (string) $room['id'] ) : '';
+		$id = isset( $room['id'] ) && is_scalar( $room['id'] ) ? preg_replace( '/[^a-z0-9]/', '', (string) $room['id'] ) : '';
 		// Assign a fresh id when missing OR when it collides with another room in this batch
 		// (self-heals rooms that were saved with a duplicate id by an earlier version).
 		if ( '' === $id || isset( $used[ $id ] ) ) {
@@ -225,6 +225,7 @@ function rar_sanitize( $in ) {
 
 /** 'Y-m-d' if valid, else ''. */
 function rar_sanitize_date( $d ) {
+	if ( ! is_scalar( $d ) ) { return ''; }
 	$d = (string) $d;
 	if ( ! preg_match( '/^(\d{4})-(\d{2})-(\d{2})$/', $d, $m ) ) { return ''; }
 	return checkdate( (int) $m[2], (int) $m[3], (int) $m[1] ) ? $d : '';
@@ -275,9 +276,10 @@ function rar_public_room( $r ) {
 
 /** Normalize a list of email domains: lowercase, strip a leading "@", drop invalid entries and duplicates. */
 function rar_sanitize_domains( $in ) {
-	$list = is_array( $in ) ? $in : preg_split( '/[\s,;]+/', (string) $in );
+	$list = is_array( $in ) ? $in : ( is_scalar( $in ) ? preg_split( '/[\s,;]+/', (string) $in ) : array() );
 	$out  = array();
 	foreach ( $list as $d ) {
+		if ( ! is_scalar( $d ) ) { continue; }
 		$d = ltrim( strtolower( trim( (string) $d ) ), '@' );
 		if ( preg_match( '/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/', $d ) && ! in_array( $d, $out, true ) ) {
 			$out[] = $d;
