@@ -4,12 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-"Reserve a Room" — a single-file WordPress plugin (`reserve-a-room.php`) for library study-room booking. No build step, no dependencies, no test suite. Staff configure rooms/rules in wp-admin; patrons book via the `[reserve_a_room]` shortcode.
+"Reserve a Room" — a single-file WordPress plugin (`reserve-a-room.php`) for library study-room booking. No build step, no dependencies. Tests run on a stub harness (see Commands). Staff configure rooms/rules in wp-admin; patrons book via the `[reserve_a_room]` shortcode.
 
 ## Commands
 
 - Syntax check: `php -l reserve-a-room.php` (PHP is on PATH). Must stay compatible with PHP 7.2 / WP 5.6 (header minimums).
-- There is no local WP environment in the repo; behavior changes are verified by installing the release zip on a WordPress site.
+- Tests: `C:\Users\thoma\bin\php\php.exe tests/run.php` (add `-q` to print only failures and the summary). No Composer or PHPUnit. `tests/run.php` stubs the WordPress functions and a fake `$wpdb` (it records SQL and returns canned rows; it does not run SQL), loads the plugin, then `tests/cases.php` runs the cases and exits non-zero on any failure. Add a case there when you change a rule, sanitizer, REST handler or email. Unit tests cannot exercise the real `UNIQUE(room_id, slot_start)` double-booking guard, `rar_install()`/dbDelta, `rar_fix_created_tz()`, the CSV download body or the widget JS; those still need a check on a WordPress site.
+- `tests/` must stay out of the release zip (the zip holds only the `.php` file, README and LICENSE).
+- There is no local WP environment in the repo; behavior changes are also verified by installing the release zip on a WordPress site.
 
 ## Release workflow (every change)
 

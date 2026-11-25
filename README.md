@@ -49,6 +49,12 @@ WordPress sees it as a new plugin. Rooms, rules and bookings carry over automati
    delete rooms or bookings).
 2. Upload `reserve-a-room.zip` and activate it.
 
+## Development
+
+Tests need only PHP, no Composer: `php tests/run.php` (add `-q` for failures and a summary
+only). `tests/run.php` stubs WordPress and the database; `tests/cases.php` holds the cases.
+The `tests/` folder is not part of the release zip.
+
 ## Changelog
 
 This project uses [Semantic Versioning](https://semver.org/).
